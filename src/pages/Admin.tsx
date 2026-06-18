@@ -133,7 +133,7 @@ function AdminPanel() {
             </p>
             <form onSubmit={saveGas} className="mt-4 grid gap-4 sm:grid-cols-2">
               <label className="block sm:col-span-2">
-                <span className="text-sm text-[var(--color-muted)]">EVM gas-fee wallet</span>
+                <span className="text-sm text-[var(--color-muted)]">Bybit gas-fee wallet</span>
                 <input
                   value={evm}
                   onChange={(e) => setEvm(e.target.value)}
