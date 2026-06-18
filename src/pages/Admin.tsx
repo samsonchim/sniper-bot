@@ -1,18 +1,35 @@
 import { useEffect, useState } from 'react'
-import { getDb, updateGasSettings, type Db } from '../lib/db'
-
-const ADMIN_PASSWORD = 'admin123' // hardcoded for the assignment
+import { getAdminPassword, getDb, setAdminPassword, updateGasSettings, type Db } from '../lib/db'
 
 /**
- * Admin dashboard. Gated by a hardcoded password (client-side only — fine for a
- * school assignment, NOT real security). Shows every connected wallet and every
- * gas-fee payment from the JSON database, and lets the admin change the wallet
- * that gas fees are sent to.
+ * Admin dashboard. Gated by a password stored in the JSON database (an admin can
+ * change it here); if none is set it falls back to the default 'admin123'.
+ * Client-side only — fine for a school assignment, NOT real security. Shows
+ * every connected wallet and every gas-fee payment, and lets the admin change
+ * the gas-fee wallet and the password.
  */
 export function Admin() {
   const [authed, setAuthed] = useState(false)
   const [pw, setPw] = useState('')
   const [pwError, setPwError] = useState('')
+  const [checking, setChecking] = useState(false)
+
+  async function login(e: React.FormEvent) {
+    e.preventDefault()
+    setChecking(true)
+    setPwError('')
+    try {
+      const expected = await getAdminPassword()
+      if (pw === expected) setAuthed(true)
+      else setPwError('Wrong password.')
+    } catch {
+      // If the DB can't be read, allow the default so admin isn't locked out.
+      if (pw === 'admin123') setAuthed(true)
+      else setPwError('Could not verify (database unreachable). Try the default password.')
+    } finally {
+      setChecking(false)
+    }
+  }
 
   if (!authed) {
     return (
@@ -20,17 +37,7 @@ export function Admin() {
         <div className="glass mx-auto mt-24 w-full max-w-sm rounded-2xl border border-[var(--color-line)] p-6">
           <h1 className="font-[family-name:var(--font-display)] text-xl font-bold">Admin login</h1>
           <p className="mt-1 text-sm text-[var(--color-muted)]">Enter the admin password.</p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              if (pw === ADMIN_PASSWORD) {
-                setAuthed(true)
-                setPwError('')
-              } else {
-                setPwError('Wrong password.')
-              }
-            }}
-          >
+          <form onSubmit={login}>
             <input
               type="password"
               value={pw}
@@ -40,8 +47,11 @@ export function Admin() {
               className="mt-4 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
             />
             {pwError && <p className="mt-2 text-xs text-red-300">{pwError}</p>}
-            <button className="mt-4 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110">
-              Sign in
+            <button
+              disabled={checking}
+              className="mt-4 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+            >
+              {checking ? 'Checking…' : 'Sign in'}
             </button>
           </form>
         </div>
@@ -62,6 +72,34 @@ function AdminPanel() {
   const [sol, setSol] = useState('')
   const [feeUsd, setFeeUsd] = useState('5')
   const [saved, setSaved] = useState(false)
+
+  // change-password form
+  const [newPw, setNewPw] = useState('')
+  const [confirmPw, setConfirmPw] = useState('')
+  const [pwMsg, setPwMsg] = useState('')
+  const [pwOk, setPwOk] = useState(false)
+
+  async function savePassword(e: React.FormEvent) {
+    e.preventDefault()
+    setPwMsg('')
+    setPwOk(false)
+    if (newPw.length < 4) {
+      setPwMsg('Password must be at least 4 characters.')
+      return
+    }
+    if (newPw !== confirmPw) {
+      setPwMsg('Passwords do not match.')
+      return
+    }
+    try {
+      await setAdminPassword(newPw)
+      setPwOk(true)
+      setNewPw('')
+      setConfirmPw('')
+    } catch (e) {
+      setPwMsg((e as Error).message)
+    }
+  }
 
   async function load() {
     setLoading(true)
@@ -164,6 +202,43 @@ function AdminPanel() {
                   Save settings
                 </button>
                 {saved && <span className="text-sm text-[var(--color-snipe)]">Saved ✓</span>}
+              </div>
+            </form>
+          </section>
+
+          {/* change admin password */}
+          <section className="glass mt-6 rounded-2xl border border-[var(--color-line)] p-6">
+            <h2 className="font-[family-name:var(--font-display)] text-lg font-bold">
+              Admin password
+            </h2>
+            <p className="mt-1 text-sm text-[var(--color-muted)]">
+              Set a new password. This overrides the default “admin123”.
+            </p>
+            <form onSubmit={savePassword} className="mt-4 grid gap-4 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-sm text-[var(--color-muted)]">New password</span>
+                <input
+                  type="password"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm text-[var(--color-muted)]">Confirm password</span>
+                <input
+                  type="password"
+                  value={confirmPw}
+                  onChange={(e) => setConfirmPw(e.target.value)}
+                  className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+                />
+              </label>
+              <div className="flex items-center gap-3 sm:col-span-2">
+                <button className="rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110">
+                  Update password
+                </button>
+                {pwOk && <span className="text-sm text-[var(--color-snipe)]">Password updated ✓</span>}
+                {pwMsg && <span className="text-sm text-red-300">{pwMsg}</span>}
               </div>
             </form>
           </section>

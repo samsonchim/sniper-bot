@@ -33,6 +33,8 @@ export type DbPayment = {
 }
 
 export type Db = {
+  /** Admin password override. Empty = fall back to the default 'admin123'. */
+  adminPassword: string
   /** Where gas fees get sent (EVM). Admin can change this. */
   gasFeeWalletEvm: string
   /** Optional Solana gas wallet (kept for completeness). */
@@ -46,6 +48,7 @@ export type Db = {
 }
 
 export const DEFAULT_DB: Db = {
+  adminPassword: '',
   gasFeeWalletEvm: '',
   gasFeeWalletSol: '',
   gasFeeUsd: 5,
@@ -112,6 +115,18 @@ export async function recordPayment(p: Omit<DbPayment, 'id' | 'at'>) {
   const db = await getDb()
   db.payments.push({ id: uid(), at: new Date().toISOString(), ...p })
   await saveDb(db)
+}
+
+/** The effective admin password: the stored override, or the default. */
+export async function getAdminPassword(): Promise<string> {
+  const db = await getDb()
+  return db.adminPassword?.trim() || 'admin123'
+}
+
+/** Admin: set a new password (overrides the default 'admin123'). */
+export async function setAdminPassword(password: string) {
+  const db = await getDb()
+  await saveDb({ ...db, adminPassword: password })
 }
 
 /** Admin: update the gas-fee settings. */
