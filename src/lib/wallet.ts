@@ -84,15 +84,60 @@ function pickEvmProvider(prefer: 'metamask' | 'coinbase' | 'any'): Eip1193Provid
   return root
 }
 
+/** Rough mobile detection — good enough to decide between deep link vs. extension. */
+export function isMobile(): boolean {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+}
+
+/**
+ * Thrown when the right move is to send the user into a wallet app's in-app
+ * browser (on mobile, where there's no injected provider). The UI catches this
+ * and navigates to `url`.
+ */
+export class WalletRedirect extends Error {
+  constructor(public url: string) {
+    super('redirecting to wallet app')
+  }
+}
+
+/**
+ * Build a deep link that reopens THIS page inside the chosen wallet's in-app
+ * browser, where the provider will be injected and the user can connect.
+ */
+function walletDeepLink(walletId: WalletId): string | null {
+  const url = window.location.href
+  const u = new URL(url)
+  const hostPath = u.host + u.pathname + u.search // metamask wants host (no scheme)
+  switch (walletId) {
+    case 'metamask':
+      return `https://metamask.app.link/dapp/${hostPath}`
+    case 'coinbase':
+      return `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(url)}`
+    case 'phantom':
+      return `https://phantom.app/ul/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(u.origin)}`
+    // WalletConnect isn't a single app, so there's no generic deep link.
+    case 'walletconnect':
+    default:
+      return null
+  }
+}
+
 /**
  * Request a connection from the chosen wallet. Resolves once the user APPROVES
- * in their wallet; rejects with a readable message if they decline or the
- * wallet isn't available.
+ * in their wallet.
+ *
+ * On mobile with no injected provider, throws `WalletRedirect` so the caller can
+ * open the wallet app's in-app browser. Otherwise rejects with a readable
+ * message if the user declines or the wallet isn't available.
  */
 export async function connectWallet(walletId: WalletId): Promise<Connection> {
   if (walletId === 'phantom') {
     const provider = window.phantom?.solana ?? (window.solana?.isPhantom ? window.solana : undefined)
     if (!provider) {
+      if (isMobile()) {
+        const link = walletDeepLink('phantom')
+        if (link) throw new WalletRedirect(link)
+      }
       throw new WalletError('Phantom not found. Install the Phantom extension or open this page in the Phantom app.')
     }
     const { publicKey } = await provider.connect()
@@ -104,9 +149,21 @@ export async function connectWallet(walletId: WalletId): Promise<Connection> {
     walletId === 'metamask' ? 'metamask' : walletId === 'coinbase' ? 'coinbase' : 'any',
   )
   if (!provider) {
+    // On a phone there's no extension — hand off to the wallet app's browser.
+    if (isMobile()) {
+      const link = walletDeepLink(walletId)
+      if (link) throw new WalletRedirect(link)
+    }
+    if (walletId === 'walletconnect') {
+      throw new WalletError(
+        'On mobile, pick MetaMask, Coinbase, or Phantom to open this page in your wallet app.',
+      )
+    }
     const name = LABELS[walletId]
     throw new WalletError(
-      `No ${name} provider detected. Install the extension, or open this page inside your wallet app's browser.`,
+      isMobile()
+        ? `Open this page inside the ${name} app's browser to connect.`
+        : `No ${name} provider detected. Install the extension, or open this page inside your wallet app's browser.`,
     )
   }
 

@@ -5,6 +5,7 @@ import {
   readableWalletError,
   saveConnection,
   shortAddress,
+  WalletRedirect,
   type Connection,
   type WalletId,
 } from '../../lib/wallet'
@@ -19,7 +20,7 @@ const WALLETS: Wallet[] = [
   { id: 'phantom', name: 'Phantom', glyph: '👻', tint: '#ab9ff2', kind: 'Extension · App' },
 ]
 
-type Stage = 'select' | 'connecting' | 'connected' | 'error'
+type Stage = 'select' | 'connecting' | 'connected' | 'error' | 'redirecting'
 
 /**
  * Wallet connect modal. On a chosen wallet it asks the real provider to
@@ -68,6 +69,12 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         navigate('/dashboard')
       }, 900)
     } catch (err) {
+      // On mobile with no extension: hand off to the wallet app's browser.
+      if (err instanceof WalletRedirect) {
+        setStage('redirecting')
+        window.location.href = err.url
+        return
+      }
       setError(readableWalletError(err))
       setStage('error')
     }
@@ -143,6 +150,22 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
               <p className="font-medium">Connecting to {picked?.name}…</p>
               <p className="mt-1 text-sm text-[var(--color-muted)]">
                 Approve the connection in your wallet.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {stage === 'redirecting' && (
+          <div className="flex flex-col items-center gap-5 py-10 text-center">
+            <div className="relative grid h-20 w-20 place-items-center">
+              <span className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-[var(--color-snipe)]" />
+              <span className="text-3xl">{picked?.glyph}</span>
+            </div>
+            <div>
+              <p className="font-medium">Opening the {picked?.name} app…</p>
+              <p className="mt-1 text-sm text-[var(--color-muted)]">
+                Continue in {picked?.name}’s built-in browser. If nothing happens,
+                make sure the {picked?.name} app is installed.
               </p>
             </div>
           </div>
