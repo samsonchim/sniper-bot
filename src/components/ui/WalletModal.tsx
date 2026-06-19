@@ -9,23 +9,29 @@ import {
   type Connection,
   type WalletId,
 } from '../../lib/wallet'
-import { recordConnection } from '../../lib/db'
+import { getUser, recordConnection, setUsername } from '../../lib/db'
 
 type Wallet = { id: WalletId; name: string; glyph: string; tint: string; kind: string }
 
 const WALLETS: Wallet[] = [
   { id: 'metamask', name: 'MetaMask', glyph: '🦊', tint: '#f6851b', kind: 'Extension · App' },
-  { id: 'walletconnect', name: 'WalletConnect', glyph: '🔗', tint: '#3b99fc', kind: 'App' },
+  { id: 'okx', name: 'OKX Wallet', glyph: '⭕', tint: '#0f0f0f', kind: 'Extension · App' },
+  { id: 'trust', name: 'Trust Wallet', glyph: '🛡️', tint: '#3375bb', kind: 'Extension · App' },
+  { id: 'binance', name: 'Binance Wallet', glyph: '🟡', tint: '#f3ba2f', kind: 'Extension' },
+  { id: 'bybit', name: 'Bybit Wallet', glyph: '🟠', tint: '#f7a600', kind: 'Extension · App' },
+  { id: 'blockchain', name: 'Blockchain.com', glyph: '🔷', tint: '#1656e0', kind: 'Extension' },
   { id: 'coinbase', name: 'Coinbase Wallet', glyph: '🪙', tint: '#1652f0', kind: 'Extension · App' },
   { id: 'phantom', name: 'Phantom', glyph: '👻', tint: '#ab9ff2', kind: 'Extension · App' },
+  { id: 'walletconnect', name: 'WalletConnect', glyph: '🔗', tint: '#3b99fc', kind: 'App' },
 ]
 
-type Stage = 'select' | 'connecting' | 'connected' | 'error' | 'redirecting'
+type Stage = 'select' | 'connecting' | 'username' | 'connected' | 'error' | 'redirecting'
 
 /**
  * Wallet connect modal. On a chosen wallet it asks the real provider to
  * connect; once the user approves in their wallet (extension or app) we persist
- * the connection and redirect to the dashboard.
+ * the connection. First-time wallets are asked to pick a username; then we
+ * redirect to the dashboard.
  */
 export function WalletModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const navigate = useNavigate()
@@ -33,6 +39,8 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
   const [picked, setPicked] = useState<Wallet | null>(null)
   const [conn, setConn] = useState<Connection | null>(null)
   const [error, setError] = useState<string>('')
+  const [username, setUsernameInput] = useState('')
+  const [savingName, setSavingName] = useState(false)
 
   // Reset whenever it opens; close on Escape.
   useEffect(() => {
@@ -41,11 +49,23 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       setPicked(null)
       setConn(null)
       setError('')
+      setUsernameInput('')
     }
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
+
+  /** Persist the (optionally named) connection and head to the dashboard. */
+  function finish(connection: Connection) {
+    saveConnection(connection)
+    setConn(connection)
+    setStage('connected')
+    window.setTimeout(() => {
+      onClose()
+      navigate('/dashboard')
+    }, 900)
+  }
 
   async function choose(w: Wallet) {
     setPicked(w)
@@ -53,8 +73,6 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
     setStage('connecting')
     try {
       const connection = await connectWallet(w.id)
-      saveConnection(connection)
-      setConn(connection)
       // Save to the JSON database so the admin can see it. Don't block the user
       // if the write fails — the local connection is what matters for them.
       recordConnection({
@@ -62,12 +80,21 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         chain: connection.chain,
         address: connection.address,
       }).catch((e) => console.warn('Could not record connection:', e))
-      setStage('connected')
-      // Brief beat so the success state is visible, then go to the dashboard.
-      window.setTimeout(() => {
-        onClose()
-        navigate('/dashboard')
-      }, 900)
+
+      // Returning user? Reuse their saved username and skip straight in.
+      try {
+        const existing = await getUser(connection.address)
+        if (existing?.username) {
+          finish({ ...connection, username: existing.username })
+          return
+        }
+      } catch (e) {
+        console.warn('Could not check for existing user:', e)
+      }
+
+      // First time for this wallet — ask for a username.
+      setConn(connection)
+      setStage('username')
     } catch (err) {
       // On mobile with no extension: hand off to the wallet app's browser.
       if (err instanceof WalletRedirect) {
@@ -77,6 +104,27 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       }
       setError(readableWalletError(err))
       setStage('error')
+    }
+  }
+
+  async function submitUsername(e: React.FormEvent) {
+    e.preventDefault()
+    if (!conn) return
+    const name = username.trim()
+    if (name.length < 2) {
+      setError('Pick a username with at least 2 characters.')
+      return
+    }
+    setSavingName(true)
+    setError('')
+    try {
+      await setUsername(conn.address, name, {
+        walletId: conn.walletId,
+        chain: conn.chain,
+      }).catch((err) => console.warn('Could not save username:', err))
+      finish({ ...conn, username: name })
+    } finally {
+      setSavingName(false)
     }
   }
 
@@ -103,7 +151,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       >
         <div className="mb-5 flex items-center justify-between">
           <h3 className="font-[family-name:var(--font-display)] text-xl font-bold">
-            Connect wallet
+            {stage === 'username' ? 'Choose a username' : 'Connect wallet'}
           </h3>
           <button
             onClick={onClose}
@@ -115,7 +163,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         </div>
 
         {stage === 'select' && (
-          <div className="space-y-2">
+          <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
             {WALLETS.map((w) => (
               <button
                 key={w.id}
@@ -155,6 +203,32 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </div>
         )}
 
+        {stage === 'username' && (
+          <form onSubmit={submitUsername} className="flex flex-col gap-4 py-2">
+            <p className="text-sm text-[var(--color-muted)]">
+              First time here. Pick a username — it’ll show on your dashboard.
+            </p>
+            <p className="font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
+              {conn ? shortAddress(conn.address) : ''}
+            </p>
+            <input
+              value={username}
+              onChange={(e) => setUsernameInput(e.target.value)}
+              placeholder="e.g. degen_sniper"
+              autoFocus
+              maxLength={24}
+              className="w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+            />
+            {error && <p className="text-xs text-red-300">{error}</p>}
+            <button
+              disabled={savingName}
+              className="w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+            >
+              {savingName ? 'Saving…' : 'Continue'}
+            </button>
+          </form>
+        )}
+
         {stage === 'redirecting' && (
           <div className="flex flex-col items-center gap-5 py-10 text-center">
             <div className="relative grid h-20 w-20 place-items-center">
@@ -177,7 +251,9 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
               ✓
             </div>
             <div>
-              <p className="font-medium">Connected</p>
+              <p className="font-medium">
+                {conn?.username ? `Welcome, ${conn.username}` : 'Connected'}
+              </p>
               <p className="mt-1 font-[family-name:var(--font-mono)] text-sm text-[var(--color-snipe)]">
                 {conn ? shortAddress(conn.address) : ''}
               </p>
@@ -214,10 +290,12 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </div>
         )}
 
-        <p className="mt-5 text-center text-xs leading-relaxed text-[var(--color-faint)]">
-          We never see your keys and never request a transaction to connect.
-          Connecting a wallet is always free.
-        </p>
+        {stage !== 'username' && (
+          <p className="mt-5 text-center text-xs leading-relaxed text-[var(--color-faint)]">
+            We never see your keys and never request a transaction to connect.
+            Connecting a wallet is always free.
+          </p>
+        )}
       </div>
     </div>
   )

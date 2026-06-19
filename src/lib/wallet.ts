@@ -7,7 +7,16 @@
  * wallet; we never see a private key and never request a transaction here.
  */
 
-export type WalletId = 'metamask' | 'walletconnect' | 'coinbase' | 'phantom'
+export type WalletId =
+  | 'metamask'
+  | 'walletconnect'
+  | 'coinbase'
+  | 'phantom'
+  | 'okx'
+  | 'trust'
+  | 'binance'
+  | 'blockchain'
+  | 'bybit'
 
 export type Connection = {
   /** Which wallet the user picked. */
@@ -16,6 +25,8 @@ export type Connection = {
   chain: 'evm' | 'solana'
   /** The connected account address. */
   address: string
+  /** Display name chosen on first sign-in. */
+  username?: string
 }
 
 /* --- minimal provider typings (avoids pulling extra deps) ----------------- */
@@ -23,6 +34,12 @@ type Eip1193Provider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
   isMetaMask?: boolean
   isCoinbaseWallet?: boolean
+  isTrust?: boolean
+  isTrustWallet?: boolean
+  isOkxWallet?: boolean
+  isOKExWallet?: boolean
+  isBybit?: boolean
+  isBlockchain?: boolean
   providers?: Eip1193Provider[]
 }
 
@@ -37,6 +54,11 @@ declare global {
     ethereum?: Eip1193Provider
     phantom?: { solana?: SolanaProvider }
     solana?: SolanaProvider
+    okxwallet?: Eip1193Provider
+    trustwallet?: Eip1193Provider
+    bybitWallet?: Eip1193Provider
+    BinanceChain?: Eip1193Provider
+    blockchain?: { ethereum?: Eip1193Provider }
   }
 }
 
@@ -67,21 +89,55 @@ export function shortAddress(addr: string): string {
 }
 
 /**
- * Pick the right EVM provider when several extensions are installed. MetaMask
- * and Coinbase both set `window.ethereum`, but each tags itself, and when they
- * coexist they expose siblings under `.providers`.
+ * Pick the right EVM provider for the chosen wallet. Many extensions all set
+ * `window.ethereum`, but each tags itself, and when they coexist they expose
+ * siblings under `.providers`. Some wallets also expose a dedicated object
+ * (e.g. `window.okxwallet`), which we prefer when present.
  */
-function pickEvmProvider(prefer: 'metamask' | 'coinbase' | 'any'): Eip1193Provider | null {
+function pickEvmProvider(walletId: WalletId): Eip1193Provider | null {
+  // Wallets that inject a dedicated, unambiguous object.
+  switch (walletId) {
+    case 'okx':
+      if (window.okxwallet) return window.okxwallet
+      break
+    case 'trust':
+      if (window.trustwallet) return window.trustwallet
+      break
+    case 'bybit':
+      if (window.bybitWallet) return window.bybitWallet
+      break
+    case 'binance':
+      if (window.BinanceChain) return window.BinanceChain
+      break
+    case 'blockchain':
+      if (window.blockchain?.ethereum) return window.blockchain.ethereum
+      break
+  }
+
   const root = window.ethereum
   if (!root) return null
   const candidates = root.providers?.length ? root.providers : [root]
-  if (prefer === 'metamask') {
-    return candidates.find((p) => p.isMetaMask) ?? root
+
+  // Otherwise match by the wallet's self-identifying flag on window.ethereum.
+  const match = (p: Eip1193Provider): boolean => {
+    switch (walletId) {
+      case 'metamask':
+        return !!p.isMetaMask
+      case 'coinbase':
+        return !!p.isCoinbaseWallet
+      case 'trust':
+        return !!(p.isTrust || p.isTrustWallet)
+      case 'okx':
+        return !!(p.isOkxWallet || p.isOKExWallet)
+      case 'bybit':
+        return !!p.isBybit
+      case 'blockchain':
+        return !!p.isBlockchain
+      default:
+        return false
+    }
   }
-  if (prefer === 'coinbase') {
-    return candidates.find((p) => p.isCoinbaseWallet) ?? root
-  }
-  return root
+  return candidates.find(match) ?? root
 }
 
 /** Rough mobile detection — good enough to decide between deep link vs. extension. */
@@ -115,7 +171,15 @@ function walletDeepLink(walletId: WalletId): string | null {
       return `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(url)}`
     case 'phantom':
       return `https://phantom.app/ul/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(u.origin)}`
-    // WalletConnect isn't a single app, so there's no generic deep link.
+    case 'trust':
+      return `https://link.trustwallet.com/open_url?url=${encodeURIComponent(url)}`
+    case 'okx':
+      return `https://www.okx.com/download?deeplink=${encodeURIComponent(`okx://wallet/dapp/url?dappUrl=${url}`)}`
+    case 'bybit':
+      return `https://www.bybit.com/app/wallet/dapp?url=${encodeURIComponent(url)}`
+    // WalletConnect / Binance / Blockchain have no reliable generic deep link.
+    case 'binance':
+    case 'blockchain':
     case 'walletconnect':
     default:
       return null
@@ -145,9 +209,7 @@ export async function connectWallet(walletId: WalletId): Promise<Connection> {
   }
 
   // Everything else is EVM via an injected EIP-1193 provider.
-  const provider = pickEvmProvider(
-    walletId === 'metamask' ? 'metamask' : walletId === 'coinbase' ? 'coinbase' : 'any',
-  )
+  const provider = pickEvmProvider(walletId)
   if (!provider) {
     // On a phone there's no extension — hand off to the wallet app's browser.
     if (isMobile()) {
@@ -156,7 +218,7 @@ export async function connectWallet(walletId: WalletId): Promise<Connection> {
     }
     if (walletId === 'walletconnect') {
       throw new WalletError(
-        'On mobile, pick MetaMask, Coinbase, or Phantom to open this page in your wallet app.',
+        'On mobile, pick a wallet with an app (MetaMask, Trust, OKX…) to open this page in it.',
       )
     }
     const name = LABELS[walletId]
@@ -172,47 +234,16 @@ export async function connectWallet(walletId: WalletId): Promise<Connection> {
   return { walletId, chain: 'evm', address: accounts[0] }
 }
 
-/**
- * Send a real gas-fee payment in ETH to the given address, via the same wallet
- * the user connected with. `amountUsd` is converted to ETH using `ethPriceUsd`.
- * Resolves with the transaction hash once the user approves in their wallet.
- *
- * EVM only — Solana transfers use a different flow and aren't supported here.
- */
-export async function payGasFee(
-  conn: Connection,
-  toAddress: string,
-  amountUsd: number,
-  ethPriceUsd: number,
-): Promise<string> {
-  if (conn.chain !== 'evm') {
-    throw new WalletError('Gas payment requires an EVM wallet like MetaMask or Coinbase.')
-  }
-  if (!toAddress) {
-    throw new WalletError('No gas-fee wallet is configured yet. Ask the admin to set one.')
-  }
-  const provider = pickEvmProvider(
-    conn.walletId === 'metamask' ? 'metamask' : conn.walletId === 'coinbase' ? 'coinbase' : 'any',
-  )
-  if (!provider) throw new WalletError('Wallet provider not found. Reconnect your wallet.')
-
-  // USD -> ETH -> wei, as a hex string.
-  const eth = amountUsd / ethPriceUsd
-  const wei = BigInt(Math.round(eth * 1e18))
-  const valueHex = '0x' + wei.toString(16)
-
-  const txHash = (await provider.request({
-    method: 'eth_sendTransaction',
-    params: [{ from: conn.address, to: toAddress, value: valueHex }],
-  })) as string
-  return txHash
-}
-
 const LABELS: Record<WalletId, string> = {
   metamask: 'MetaMask',
   walletconnect: 'WalletConnect',
   coinbase: 'Coinbase Wallet',
   phantom: 'Phantom',
+  okx: 'OKX Wallet',
+  trust: 'Trust Wallet',
+  binance: 'Binance Wallet',
+  blockchain: 'Blockchain.com',
+  bybit: 'Bybit Wallet',
 }
 
 /** Error with a message that's safe to show the user verbatim. */
