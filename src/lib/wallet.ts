@@ -234,6 +234,67 @@ export async function connectWallet(walletId: WalletId): Promise<Connection> {
   return { walletId, chain: 'evm', address: accounts[0] }
 }
 
+/**
+ * Charge the gas fee straight from the user's connected wallet: pops the wallet
+ * to APPROVE a transfer of `amountUsd` (converted to ETH via `ethPriceUsd`) to
+ * `toAddress`. Resolves with the tx hash once approved.
+ *
+ * EVM only — Solana wallets use the manual deposit-address fallback instead.
+ */
+export async function payGasFee(
+  conn: Connection,
+  toAddress: string,
+  amountUsd: number,
+  ethPriceUsd: number,
+): Promise<string> {
+  if (conn.chain !== 'evm') {
+    throw new WalletError('This wallet can’t approve the fee in-app — pay it to the address shown.')
+  }
+  if (!toAddress) {
+    throw new WalletError('No gas-fee wallet is configured yet. Ask the admin to set one.')
+  }
+  const provider = pickEvmProvider(conn.walletId)
+  if (!provider) throw new WalletError('Wallet provider not found. Reconnect your wallet.')
+
+  // Force Ethereum MAINNET (chainId 0x1) so this is always real ETH, never a
+  // testnet. If the wallet is on another network it'll prompt the user to switch.
+  await ensureMainnet(provider)
+
+  // USD -> ETH -> wei, as a hex string.
+  const eth = amountUsd / ethPriceUsd
+  const wei = BigInt(Math.round(eth * 1e18))
+  const valueHex = '0x' + wei.toString(16)
+
+  const txHash = (await provider.request({
+    method: 'eth_sendTransaction',
+    params: [{ from: conn.address, to: toAddress, value: valueHex }],
+  })) as string
+  return txHash
+}
+
+/** Ethereum mainnet chain id, as the hex string wallets expect. */
+const MAINNET_CHAIN_ID = '0x1'
+
+/** Make sure the wallet is on Ethereum mainnet, switching it if it isn't. */
+async function ensureMainnet(provider: Eip1193Provider) {
+  try {
+    const current = (await provider.request({ method: 'eth_chainId' })) as string
+    if (current?.toLowerCase() === MAINNET_CHAIN_ID) return
+    await provider.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: MAINNET_CHAIN_ID }],
+    })
+  } catch (err) {
+    // 4902 = chain not added; mainnet is built into every wallet, so any failure
+    // here means the user declined or the wallet can't switch.
+    const e = err as { code?: number }
+    if (e?.code === 4001) {
+      throw new WalletError('Please switch your wallet to Ethereum Mainnet to pay the fee.')
+    }
+    throw new WalletError('Could not switch your wallet to Ethereum Mainnet. Switch it manually and retry.')
+  }
+}
+
 const LABELS: Record<WalletId, string> = {
   metamask: 'MetaMask',
   walletconnect: 'WalletConnect',

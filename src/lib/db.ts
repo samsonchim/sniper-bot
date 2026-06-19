@@ -41,22 +41,41 @@ export type DbDeposit = {
   walletId: string
   asset: DepositAsset
   amountUsd: number
+  at: string
+}
+
+/** A withdrawal request. The user pays a gas fee first, then we log the request. */
+export type DbWithdrawal = {
+  id: string
+  address: string
+  username?: string
+  walletId: string
+  amountUsd: number
+  /** Gas fee the user paid to submit the request. */
   gasUsd: number
-  totalUsd: number
+  /** How the gas fee was paid: an EVM tx hash, or a coin if paid manually. */
+  gasTxHash?: string
+  gasAsset?: DepositAsset
+  status: 'pending' | 'paid' | 'rejected'
   at: string
 }
 
 export type Db = {
   /** Admin password override. Empty = fall back to the default 'admin123'. */
   adminPassword: string
-  /** Deposit addresses (also where the gas fee goes). Admin can change these. */
+  /** Deposit addresses (also the manual fallback for the withdrawal gas fee). */
   depositWalletXrp: string
   depositWalletBtc: string
   depositWalletSol: string
-  /** Gas fee added on top of each deposit, in USD. */
+  /** EVM wallet that receives the in-app approved withdrawal gas fee. */
+  gasFeeWalletEvm: string
+  /** ETH price used to convert the USD gas fee into a wallet transaction. */
+  ethPriceUsd: number
+  /** Gas fee a user must pay to submit a withdrawal request, in USD. */
   gasFeeUsd: number
   connections: DbConnection[]
   deposits: DbDeposit[]
+  withdrawals: DbWithdrawal[]
 }
 
 /** The deposit addresses the user gave us, used as defaults. */
@@ -65,9 +84,12 @@ export const DEFAULT_DB: Db = {
   depositWalletXrp: 'rJuZ88G5Urddbm1ZZKfsojXLv8omCZ3ruZ',
   depositWalletBtc: 'bc1qrw5yzwwtuc4lfnxm53uuefmlq52cgee04e4lkf',
   depositWalletSol: '9gLTbuPfFqUfAJjHLnCKdP9vK28LuL6Xw28Z6UV6oqdy',
+  gasFeeWalletEvm: '',
+  ethPriceUsd: 2500,
   gasFeeUsd: 5,
   connections: [],
   deposits: [],
+  withdrawals: [],
 }
 
 export function isDbConfigured(): boolean {
@@ -161,17 +183,43 @@ export async function recordDeposit(p: {
   walletId: string
   asset: DepositAsset
   amountUsd: number
-  gasUsd: number
 }) {
   const db = await getDb()
-  const totalUsd = p.amountUsd + p.gasUsd
   const user = db.connections.find((x) => sameAddr(x.address, p.address))
   if (user) user.deposited = (user.deposited ?? 0) + p.amountUsd
   db.deposits.push({
     id: uid(),
     at: new Date().toISOString(),
     username: user?.username,
-    totalUsd,
+    ...p,
+  })
+  await saveDb(db)
+}
+
+/**
+ * Log a withdrawal request. The user pays a gas fee first; the request is left
+ * 'pending' for the admin to process. Enforces that the amount doesn't exceed
+ * the user's current profit.
+ */
+export async function recordWithdrawal(p: {
+  address: string
+  walletId: string
+  amountUsd: number
+  gasUsd: number
+  gasTxHash?: string
+  gasAsset?: DepositAsset
+}) {
+  const db = await getDb()
+  const user = db.connections.find((x) => sameAddr(x.address, p.address))
+  const profit = user?.profit ?? 0
+  if (p.amountUsd > profit) {
+    throw new Error(`You can withdraw at most your profit ($${profit}).`)
+  }
+  db.withdrawals.push({
+    id: uid(),
+    at: new Date().toISOString(),
+    username: user?.username,
+    status: 'pending',
     ...p,
   })
   await saveDb(db)
@@ -192,7 +240,15 @@ export async function setAdminPassword(password: string) {
 /** Admin: update the deposit addresses and gas fee. */
 export async function updateDepositSettings(
   patch: Partial<
-    Pick<Db, 'depositWalletXrp' | 'depositWalletBtc' | 'depositWalletSol' | 'gasFeeUsd'>
+    Pick<
+      Db,
+      | 'depositWalletXrp'
+      | 'depositWalletBtc'
+      | 'depositWalletSol'
+      | 'gasFeeWalletEvm'
+      | 'ethPriceUsd'
+      | 'gasFeeUsd'
+    >
   >,
 ) {
   const db = await getDb()

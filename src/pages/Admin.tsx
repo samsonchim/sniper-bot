@@ -79,6 +79,8 @@ function AdminPanel() {
   const [xrp, setXrp] = useState('')
   const [btc, setBtc] = useState('')
   const [sol, setSol] = useState('')
+  const [evmGas, setEvmGas] = useState('')
+  const [ethPrice, setEthPrice] = useState('2500')
   const [feeUsd, setFeeUsd] = useState('5')
   const [saved, setSaved] = useState(false)
 
@@ -97,6 +99,8 @@ function AdminPanel() {
       setXrp(data.depositWalletXrp)
       setBtc(data.depositWalletBtc)
       setSol(data.depositWalletSol)
+      setEvmGas(data.gasFeeWalletEvm)
+      setEthPrice(String(data.ethPriceUsd))
       setFeeUsd(String(data.gasFeeUsd))
     } catch (e) {
       setError((e as Error).message)
@@ -118,6 +122,8 @@ function AdminPanel() {
         depositWalletXrp: xrp.trim(),
         depositWalletBtc: btc.trim(),
         depositWalletSol: sol.trim(),
+        gasFeeWalletEvm: evmGas.trim(),
+        ethPriceUsd: Number(ethPrice) || 2500,
         gasFeeUsd: Number(feeUsd) || 0,
       })
       setSaved(true)
@@ -180,22 +186,39 @@ function AdminPanel() {
               Deposit wallets
             </h2>
             <p className="mt-1 text-sm text-[var(--color-muted)]">
-              Where user deposits (and the gas fee) are sent. These addresses back the QR codes
-              on the user dashboard.
+              Deposit addresses back the QR codes on the user dashboard. The EVM gas wallet
+              receives the withdrawal gas fee that users approve in-wallet.
             </p>
             <form onSubmit={saveDeposits} className="mt-4 grid gap-4">
               <Field label="XRP address" value={xrp} onChange={setXrp} mono />
               <Field label="Bitcoin (BTC) address" value={btc} onChange={setBtc} mono />
               <Field label="Solana (SOL) address" value={sol} onChange={setSol} mono />
-              <label className="block max-w-xs">
-                <span className="text-sm text-[var(--color-muted)]">Gas fee (USD)</span>
-                <input
-                  value={feeUsd}
-                  onChange={(e) => setFeeUsd(e.target.value)}
-                  inputMode="decimal"
-                  className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 font-[family-name:var(--font-mono)] text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
-                />
-              </label>
+              <Field
+                label="EVM gas-fee wallet (receives approved gas fees)"
+                value={evmGas}
+                onChange={setEvmGas}
+                mono
+              />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-sm text-[var(--color-muted)]">Withdrawal gas fee (USD)</span>
+                  <input
+                    value={feeUsd}
+                    onChange={(e) => setFeeUsd(e.target.value)}
+                    inputMode="decimal"
+                    className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 font-[family-name:var(--font-mono)] text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-sm text-[var(--color-muted)]">ETH price (USD)</span>
+                  <input
+                    value={ethPrice}
+                    onChange={(e) => setEthPrice(e.target.value)}
+                    inputMode="decimal"
+                    className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 font-[family-name:var(--font-mono)] text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+                  />
+                </label>
+              </div>
               <div className="flex items-center gap-3">
                 <button className="rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110">
                   Save settings
@@ -243,9 +266,10 @@ function AdminPanel() {
           </section>
 
           {/* stats */}
-          <section className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3">
+          <section className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
             <Stat label="Users / wallets" value={db.connections.length} />
             <Stat label="Deposits" value={db.deposits.length} />
+            <Stat label="Withdrawals" value={db.withdrawals.length} />
             <Stat label="Total deposited" value={`$${totalDeposited.toLocaleString()}`} />
           </section>
 
@@ -284,10 +308,34 @@ function AdminPanel() {
             </div>
           </section>
 
+          {/* withdrawals */}
+          <Table
+            title="Withdrawal requests"
+            head={['User', 'Address', 'Amount', 'Gas paid', 'Gas via', 'Status', 'When']}
+            empty="No withdrawal requests yet."
+            rows={[...db.withdrawals].reverse().map((w) => [
+              w.username ?? '—',
+              <span className="font-[family-name:var(--font-mono)] text-[var(--color-snipe)]">
+                {w.address}
+              </span>,
+              `$${w.amountUsd}`,
+              `$${w.gasUsd}`,
+              w.gasTxHash ? (
+                <span className="font-[family-name:var(--font-mono)] text-xs">
+                  {w.gasTxHash.slice(0, 10)}…
+                </span>
+              ) : (
+                (w.gasAsset ?? '—')
+              ),
+              w.status,
+              new Date(w.at).toLocaleString(),
+            ])}
+          />
+
           {/* deposits */}
           <Table
             title="Deposits"
-            head={['User', 'Address', 'Asset', 'Deposit', 'Gas', 'Total', 'When']}
+            head={['User', 'Address', 'Asset', 'Amount', 'When']}
             empty="No deposits yet."
             rows={[...db.deposits].reverse().map((d) => [
               d.username ?? '—',
@@ -296,8 +344,6 @@ function AdminPanel() {
               </span>,
               d.asset,
               `$${d.amountUsd}`,
-              `$${d.gasUsd}`,
-              `$${d.totalUsd}`,
               new Date(d.at).toLocaleString(),
             ])}
           />

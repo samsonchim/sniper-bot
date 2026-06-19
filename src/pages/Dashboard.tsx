@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import {
   clearConnection,
   loadConnection,
+  payGasFee,
+  readableWalletError,
   shortAddress,
   type Connection,
 } from '../lib/wallet'
-import { getDb, recordDeposit, type DepositAsset } from '../lib/db'
+import { getDb, recordDeposit, recordWithdrawal, type DepositAsset } from '../lib/db'
 
 const WALLET_NAME: Record<string, string> = {
   metamask: 'MetaMask',
@@ -45,8 +47,15 @@ const money = (n: number) =>
   `${n < 0 ? '-' : ''}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
 
 type UserStats = { username?: string; deposited: number; profit: number; pnl: number }
-type DepositConfig = { addrs: Record<DepositAsset, string>; gasUsd: number }
-type Step = 'form' | 'deposit' | 'done' | 'error'
+type DepositConfig = {
+  addrs: Record<DepositAsset, string>
+  gasUsd: number
+  gasWalletEvm: string
+  ethPriceUsd: number
+}
+type Mode = 'deposit' | 'withdraw'
+type DepositStep = 'form' | 'pay' | 'done' | 'error'
+type WithdrawStep = 'form' | 'gas' | 'done' | 'error'
 
 /**
  * The signed-in area. Reads the persisted connection; if there isn't one we
@@ -58,7 +67,12 @@ export function Dashboard() {
   const [stats, setStats] = useState<UserStats>({ deposited: 0, profit: 0, pnl: 0 })
   const [cfg, setCfg] = useState<DepositConfig | null>(null)
 
-  // Snipe form.
+  const [mode, setMode] = useState<Mode>('deposit')
+  const [asset, setAsset] = useState<DepositAsset>('XRP')
+  const [busy, setBusy] = useState(false)
+  const [errMsg, setErrMsg] = useState('')
+
+  // Deposit form.
   const initialName = useMemo(
     () => MEME_TOKENS[Math.floor(Math.random() * MEME_TOKENS.length)].name,
     [],
@@ -67,18 +81,16 @@ export function Dashboard() {
   const token =
     MEME_TOKENS.find((t) => t.name === tokenName)?.address ?? MEME_TOKENS[0].address
   const [amount, setAmount] = useState('100')
+  const [dStep, setDStep] = useState<DepositStep>('form')
 
-  // Deposit flow.
-  const [step, setStep] = useState<Step>('form')
-  const [asset, setAsset] = useState<DepositAsset>('XRP')
-  const [busy, setBusy] = useState(false)
-  const [errMsg, setErrMsg] = useState('')
+  // Withdraw form.
+  const [wAmount, setWAmount] = useState('')
+  const [wStep, setWStep] = useState<WithdrawStep>('form')
 
   const amountUsd = Number(amount) || 0
+  const withdrawUsd = Number(wAmount) || 0
   const gasUsd = cfg?.gasUsd ?? 0
-  const totalUsd = amountUsd + gasUsd
 
-  // Pull the user's stats + the current deposit addresses from the JSON DB.
   async function refresh(address: string) {
     try {
       const db = await getDb()
@@ -98,6 +110,8 @@ export function Dashboard() {
           SOL: db.depositWalletSol,
         },
         gasUsd: db.gasFeeUsd,
+        gasWalletEvm: db.gasFeeWalletEvm,
+        ethPriceUsd: db.ethPriceUsd,
       })
     } catch (e) {
       console.warn('Could not load dashboard data:', e)
@@ -124,40 +138,11 @@ export function Dashboard() {
     navigate('/', { replace: true })
   }
 
-  function startDeposit() {
+  function switchMode(m: Mode) {
+    setMode(m)
     setErrMsg('')
-    if (amountUsd <= 0) {
-      setErrMsg('Enter a deposit amount first.')
-      return
-    }
-    setStep('deposit')
-  }
-
-  async function confirmDeposit() {
-    if (!conn) return
-    setBusy(true)
-    setErrMsg('')
-    try {
-      await recordDeposit({
-        address: conn.address,
-        walletId: conn.walletId,
-        asset,
-        amountUsd,
-        gasUsd,
-      })
-      await refresh(conn.address)
-      setStep('done')
-    } catch (e) {
-      setErrMsg((e as Error).message)
-      setStep('error')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function resetFlow() {
-    setStep('form')
-    setErrMsg('')
+    setDStep('form')
+    setWStep('form')
   }
 
   async function copyAddress() {
@@ -165,6 +150,80 @@ export function Dashboard() {
       await navigator.clipboard.writeText(depositAddress)
     } catch {
       /* clipboard may be blocked — ignore */
+    }
+  }
+
+  /* --- deposit --- */
+  function startDeposit() {
+    setErrMsg('')
+    if (amountUsd <= 0) {
+      setErrMsg('Enter a deposit amount first.')
+      return
+    }
+    setDStep('pay')
+  }
+
+  async function confirmDeposit() {
+    if (!conn) return
+    setBusy(true)
+    setErrMsg('')
+    try {
+      await recordDeposit({ address: conn.address, walletId: conn.walletId, asset, amountUsd })
+      await refresh(conn.address)
+      setDStep('done')
+    } catch (e) {
+      setErrMsg((e as Error).message)
+      setDStep('error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /* --- withdraw --- */
+  function startWithdraw() {
+    setErrMsg('')
+    if (withdrawUsd <= 0) {
+      setErrMsg('Enter an amount to withdraw.')
+      return
+    }
+    if (withdrawUsd > stats.profit) {
+      setErrMsg(`You can withdraw at most your profit (${money(stats.profit)}).`)
+      return
+    }
+    setWStep('gas')
+  }
+
+  // EVM wallets approve the gas fee in-app; Solana falls back to a manual send.
+  const evmGas = conn.chain === 'evm'
+
+  async function confirmWithdraw() {
+    if (!conn || !cfg) return
+    setBusy(true)
+    setErrMsg('')
+    try {
+      let gasTxHash: string | undefined
+      let gasAsset: DepositAsset | undefined
+      if (evmGas) {
+        // Pops the wallet — the user just approves the gas-fee transfer.
+        gasTxHash = await payGasFee(conn, cfg.gasWalletEvm, gasUsd, cfg.ethPriceUsd)
+      } else {
+        gasAsset = asset
+      }
+      await recordWithdrawal({
+        address: conn.address,
+        walletId: conn.walletId,
+        amountUsd: withdrawUsd,
+        gasUsd,
+        gasTxHash,
+        gasAsset,
+      })
+      await refresh(conn.address)
+      setWStep('done')
+    } catch (e) {
+      setErrMsg(readableWalletError(e))
+      setWStep('error')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -232,15 +291,10 @@ export function Dashboard() {
           <StatCard
             label="Profit"
             value={money(stats.profit)}
-            note="updated by desk"
+            note="available to withdraw"
             accent={stats.profit > 0}
           />
-          <StatCard
-            label="PnL"
-            value={money(stats.pnl)}
-            note="all time"
-            accent={stats.pnl > 0}
-          />
+          <StatCard label="PnL" value={money(stats.pnl)} note="all time" accent={stats.pnl > 0} />
           <StatCard label="Win rate" value="96%" note="+5% this week" accent />
         </section>
 
@@ -279,13 +333,27 @@ export function Dashboard() {
             </div>
           </div>
 
-          {/* New snipe / deposit flow */}
+          {/* deposit / withdraw panel */}
           <div className="glass rounded-2xl border border-[var(--color-line)] p-6">
-            <h2 className="mb-4 font-[family-name:var(--font-display)] text-lg font-bold">
-              New snipe
-            </h2>
+            {/* mode tabs */}
+            <div className="mb-5 grid grid-cols-2 gap-1 rounded-lg border border-[var(--color-line)] p-1">
+              {(['deposit', 'withdraw'] as Mode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => switchMode(m)}
+                  className={`rounded-md px-3 py-2 text-sm font-semibold capitalize transition ${
+                    mode === m
+                      ? 'bg-[var(--color-snipe)] text-black'
+                      : 'text-[var(--color-muted)] hover:bg-white/5'
+                  }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
 
-            {step === 'form' && (
+            {/* ----- DEPOSIT ----- */}
+            {mode === 'deposit' && dStep === 'form' && (
               <>
                 <label className="block text-sm text-[var(--color-muted)]">Token</label>
                 <select
@@ -322,110 +390,280 @@ export function Dashboard() {
                 </button>
                 {errMsg && <p className="mt-3 text-center text-xs text-red-300">{errMsg}</p>}
                 <p className="mt-3 text-center text-xs text-[var(--color-faint)]">
-                  Deposit to snipe. A {money(gasUsd)} gas fee is added and sent to the same
-                  address.
+                  Deposit to fund your snipes.
                 </p>
               </>
             )}
 
-            {step === 'deposit' && (
+            {mode === 'deposit' && dStep === 'pay' && (
+              <DepositBox
+                asset={asset}
+                setAsset={setAsset}
+                address={depositAddress}
+                onCopy={copyAddress}
+                rows={[['Total to send', money(amountUsd), true]]}
+                confirmLabel={busy ? 'Recording…' : "I've sent the deposit"}
+                onConfirm={confirmDeposit}
+                onBack={() => setDStep('form')}
+                busy={busy}
+                errMsg={errMsg}
+              />
+            )}
+
+            {mode === 'deposit' && dStep === 'done' && (
+              <Done
+                title="Deposit submitted"
+                text={`${money(amountUsd)} added to your balance. The desk will confirm it shortly.`}
+                cta="New deposit"
+                onCta={() => setDStep('form')}
+              />
+            )}
+
+            {mode === 'deposit' && dStep === 'error' && (
+              <Failed text={errMsg} onRetry={() => setDStep('pay')} />
+            )}
+
+            {/* ----- WITHDRAW ----- */}
+            {mode === 'withdraw' && wStep === 'form' && (
               <>
-                <div className="mb-3 grid grid-cols-3 gap-2">
-                  {ASSETS.map((a) => (
-                    <button
-                      key={a.id}
-                      onClick={() => setAsset(a.id)}
-                      className={`rounded-lg border px-2 py-2 text-sm font-semibold transition ${
-                        asset === a.id
-                          ? 'border-[var(--color-snipe)] bg-[var(--color-snipe)]/15 text-[var(--color-snipe)]'
-                          : 'border-[var(--color-line)] text-[var(--color-muted)] hover:bg-white/5'
-                      }`}
-                    >
-                      {a.id}
-                    </button>
-                  ))}
+                <div className="rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-4 py-3">
+                  <p className="text-xs text-[var(--color-muted)]">Available to withdraw</p>
+                  <p className="font-[family-name:var(--font-display)] text-2xl font-bold text-[var(--color-snipe)]">
+                    {money(stats.profit)}
+                  </p>
+                  <p className="mt-0.5 text-xs text-[var(--color-faint)]">
+                    You can only withdraw from your profit.
+                  </p>
                 </div>
 
-                <div className="rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-4 text-center">
-                  <img
-                    src={ASSETS.find((a) => a.id === asset)!.qr}
-                    alt={`${asset} deposit QR`}
-                    className="mx-auto h-44 w-44 rounded-lg bg-white object-contain p-1"
-                  />
-                  <p className="mt-3 text-xs text-[var(--color-muted)]">
-                    Send to this {asset} address
-                  </p>
-                  <p className="mt-1 break-all font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
-                    {depositAddress || '—'}
-                  </p>
-                  <button
-                    onClick={copyAddress}
-                    className="mt-2 rounded-md border border-[var(--color-line)] px-3 py-1 text-xs transition hover:bg-white/5"
-                  >
-                    Copy address
-                  </button>
-                </div>
-
-                <div className="mt-4 space-y-1 rounded-lg border border-[var(--color-line)] px-3 py-2 text-sm">
-                  <Row label="Deposit" value={money(amountUsd)} />
-                  <Row label="Gas fee" value={money(gasUsd)} />
-                  <div className="my-1 h-px bg-[var(--color-line)]" />
-                  <Row label="Total to send" value={money(totalUsd)} strong />
-                </div>
+                <label className="mt-4 block text-sm text-[var(--color-muted)]">
+                  Withdrawal amount (USD)
+                </label>
+                <input
+                  value={wAmount}
+                  onChange={(e) => setWAmount(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="0"
+                  className="mt-1.5 w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 font-[family-name:var(--font-mono)] text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+                />
 
                 <button
-                  onClick={confirmDeposit}
+                  onClick={startWithdraw}
+                  disabled={stats.profit <= 0}
+                  className="mt-5 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Continue
+                </button>
+                {errMsg && <p className="mt-3 text-center text-xs text-red-300">{errMsg}</p>}
+                <p className="mt-3 text-center text-xs text-[var(--color-faint)]">
+                  A {money(gasUsd)} gas fee is required to process a withdrawal.
+                </p>
+              </>
+            )}
+
+            {mode === 'withdraw' && wStep === 'gas' && evmGas && (
+              <div className="py-2">
+                <p className="text-sm text-[var(--color-muted)]">
+                  Approve the gas fee in your wallet to process your withdrawal.
+                </p>
+                <div className="mt-4 flex flex-col items-center gap-3 rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-5 text-center">
+                  <span className="text-3xl">⛽</span>
+                  <p className="font-[family-name:var(--font-display)] text-3xl font-bold text-[var(--color-snipe)]">
+                    {money(gasUsd)}
+                  </p>
+                  <p className="text-xs text-[var(--color-faint)]">
+                    gas fee · withdrawing {money(withdrawUsd)}
+                  </p>
+                </div>
+                <div className="mt-4 space-y-1 rounded-lg border border-[var(--color-line)] px-3 py-2 text-sm">
+                  <Row label="Withdrawal" value={money(withdrawUsd)} />
+                  <Row label="Gas fee" value={money(gasUsd)} strong />
+                </div>
+                <button
+                  onClick={confirmWithdraw}
                   disabled={busy}
                   className="mt-4 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
                 >
-                  {busy ? 'Recording…' : "I've sent the deposit"}
+                  {busy ? 'Confirm in your wallet…' : `Approve ${money(gasUsd)} gas fee`}
                 </button>
                 <button
-                  onClick={resetFlow}
+                  onClick={() => setWStep('form')}
                   className="mt-2 w-full rounded-lg border border-[var(--color-line)] px-5 py-2 text-sm font-semibold transition hover:bg-white/5"
                 >
                   Back
                 </button>
                 {errMsg && <p className="mt-3 text-center text-xs text-red-300">{errMsg}</p>}
-              </>
-            )}
-
-            {step === 'done' && (
-              <div className="flex flex-col items-center gap-3 py-6 text-center">
-                <div className="grid h-14 w-14 place-items-center rounded-full bg-[var(--color-snipe)]/15 text-2xl glow-snipe">
-                  ✓
-                </div>
-                <p className="font-medium">Deposit submitted</p>
-                <p className="text-sm text-[var(--color-muted)]">
-                  {money(amountUsd)} added to your balance. The desk will confirm it shortly.
-                </p>
-                <button
-                  onClick={resetFlow}
-                  className="mt-2 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110"
-                >
-                  New snipe
-                </button>
               </div>
             )}
 
-            {step === 'error' && (
-              <div className="flex flex-col items-center gap-3 py-6 text-center">
-                <div className="grid h-14 w-14 place-items-center rounded-full bg-red-500/15 text-2xl">
-                  ⚠
-                </div>
-                <p className="font-medium">Couldn’t record the deposit</p>
-                <p className="text-sm text-[var(--color-muted)]">{errMsg}</p>
-                <button
-                  onClick={() => setStep('deposit')}
-                  className="mt-2 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110"
-                >
-                  Try again
-                </button>
-              </div>
+            {mode === 'withdraw' && wStep === 'gas' && !evmGas && (
+              <DepositBox
+                heading={`Send the ${money(gasUsd)} gas fee to process your withdrawal of ${money(withdrawUsd)}.`}
+                asset={asset}
+                setAsset={setAsset}
+                address={depositAddress}
+                onCopy={copyAddress}
+                rows={[
+                  ['Withdrawal', money(withdrawUsd), false],
+                  ['Gas fee to send now', money(gasUsd), true],
+                ]}
+                confirmLabel={busy ? 'Submitting…' : "I've paid the gas fee"}
+                onConfirm={confirmWithdraw}
+                onBack={() => setWStep('form')}
+                busy={busy}
+                errMsg={errMsg}
+              />
+            )}
+
+            {mode === 'withdraw' && wStep === 'done' && (
+              <Done
+                title="Withdrawal requested"
+                text={`Your request to withdraw ${money(withdrawUsd)} was submitted. The desk will review and pay it out.`}
+                cta="Done"
+                onCta={() => {
+                  setWAmount('')
+                  setWStep('form')
+                }}
+              />
+            )}
+
+            {mode === 'withdraw' && wStep === 'error' && (
+              <Failed text={errMsg} onRetry={() => setWStep('form')} />
             )}
           </div>
         </section>
       </main>
+    </div>
+  )
+}
+
+/** Shared coin-picker + QR + address + summary + confirm box. */
+function DepositBox({
+  heading,
+  asset,
+  setAsset,
+  address,
+  onCopy,
+  rows,
+  confirmLabel,
+  onConfirm,
+  onBack,
+  busy,
+  errMsg,
+}: {
+  heading?: string
+  asset: DepositAsset
+  setAsset: (a: DepositAsset) => void
+  address: string
+  onCopy: () => void
+  rows: [string, string, boolean][]
+  confirmLabel: string
+  onConfirm: () => void
+  onBack: () => void
+  busy: boolean
+  errMsg: string
+}) {
+  return (
+    <>
+      {heading && <p className="mb-3 text-sm text-[var(--color-muted)]">{heading}</p>}
+      <div className="mb-3 grid grid-cols-3 gap-2">
+        {ASSETS.map((a) => (
+          <button
+            key={a.id}
+            onClick={() => setAsset(a.id)}
+            className={`rounded-lg border px-2 py-2 text-sm font-semibold transition ${
+              asset === a.id
+                ? 'border-[var(--color-snipe)] bg-[var(--color-snipe)]/15 text-[var(--color-snipe)]'
+                : 'border-[var(--color-line)] text-[var(--color-muted)] hover:bg-white/5'
+            }`}
+          >
+            {a.id}
+          </button>
+        ))}
+      </div>
+
+      <div className="rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-4 text-center">
+        <img
+          src={ASSETS.find((a) => a.id === asset)!.qr}
+          alt={`${asset} QR`}
+          className="mx-auto h-44 w-44 rounded-lg bg-white object-contain p-1"
+        />
+        <p className="mt-3 text-xs text-[var(--color-muted)]">Send to this {asset} address</p>
+        <p className="mt-1 break-all font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
+          {address || '—'}
+        </p>
+        <button
+          onClick={onCopy}
+          className="mt-2 rounded-md border border-[var(--color-line)] px-3 py-1 text-xs transition hover:bg-white/5"
+        >
+          Copy address
+        </button>
+      </div>
+
+      <div className="mt-4 space-y-1 rounded-lg border border-[var(--color-line)] px-3 py-2 text-sm">
+        {rows.map(([label, value, strong], i) => (
+          <Row key={i} label={label} value={value} strong={strong} />
+        ))}
+      </div>
+
+      <button
+        onClick={onConfirm}
+        disabled={busy}
+        className="mt-4 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+      >
+        {confirmLabel}
+      </button>
+      <button
+        onClick={onBack}
+        className="mt-2 w-full rounded-lg border border-[var(--color-line)] px-5 py-2 text-sm font-semibold transition hover:bg-white/5"
+      >
+        Back
+      </button>
+      {errMsg && <p className="mt-3 text-center text-xs text-red-300">{errMsg}</p>}
+    </>
+  )
+}
+
+function Done({
+  title,
+  text,
+  cta,
+  onCta,
+}: {
+  title: string
+  text: string
+  cta: string
+  onCta: () => void
+}) {
+  return (
+    <div className="flex flex-col items-center gap-3 py-6 text-center">
+      <div className="grid h-14 w-14 place-items-center rounded-full bg-[var(--color-snipe)]/15 text-2xl glow-snipe">
+        ✓
+      </div>
+      <p className="font-medium">{title}</p>
+      <p className="text-sm text-[var(--color-muted)]">{text}</p>
+      <button
+        onClick={onCta}
+        className="mt-2 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110"
+      >
+        {cta}
+      </button>
+    </div>
+  )
+}
+
+function Failed({ text, onRetry }: { text: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-3 py-6 text-center">
+      <div className="grid h-14 w-14 place-items-center rounded-full bg-red-500/15 text-2xl">⚠</div>
+      <p className="font-medium">Something went wrong</p>
+      <p className="text-sm text-[var(--color-muted)]">{text}</p>
+      <button
+        onClick={onRetry}
+        className="mt-2 w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110"
+      >
+        Try again
+      </button>
     </div>
   )
 }
