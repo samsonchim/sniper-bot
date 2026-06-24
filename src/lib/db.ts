@@ -225,6 +225,44 @@ export async function recordWithdrawal(p: {
   await saveDb(db)
 }
 
+/** A user's own withdrawal requests, newest first. */
+export async function getUserWithdrawals(address: string): Promise<DbWithdrawal[]> {
+  const db = await getDb()
+  return db.withdrawals
+    .filter((w) => sameAddr(w.address, address))
+    .sort((a, b) => (a.at < b.at ? 1 : -1))
+}
+
+/** Admin: approve a pending withdrawal (marks it paid). */
+export async function approveWithdrawal(id: string) {
+  const db = await getDb()
+  const w = db.withdrawals.find((x) => x.id === id)
+  if (!w) throw new Error('Withdrawal not found.')
+  w.status = 'paid'
+  await saveDb(db)
+}
+
+/** Admin: delete a withdrawal request. */
+export async function deleteWithdrawal(id: string) {
+  const db = await getDb()
+  db.withdrawals = db.withdrawals.filter((x) => x.id !== id)
+  await saveDb(db)
+}
+
+/** Admin: delete a deposit record. */
+export async function deleteDeposit(id: string) {
+  const db = await getDb()
+  db.deposits = db.deposits.filter((x) => x.id !== id)
+  await saveDb(db)
+}
+
+/** Admin: delete a user/connection record. */
+export async function deleteConnection(id: string) {
+  const db = await getDb()
+  db.connections = db.connections.filter((x) => x.id !== id)
+  await saveDb(db)
+}
+
 /** The effective admin password: the stored override, or the default. */
 export async function getAdminPassword(): Promise<string> {
   const db = await getDb()

@@ -8,7 +8,13 @@ import {
   shortAddress,
   type Connection,
 } from '../lib/wallet'
-import { getDb, recordDeposit, recordWithdrawal, type DepositAsset } from '../lib/db'
+import {
+  getDb,
+  recordDeposit,
+  recordWithdrawal,
+  type DbWithdrawal,
+  type DepositAsset,
+} from '../lib/db'
 
 const WALLET_NAME: Record<string, string> = {
   metamask: 'MetaMask',
@@ -66,6 +72,7 @@ export function Dashboard() {
   const [conn, setConn] = useState<Connection | null>(null)
   const [stats, setStats] = useState<UserStats>({ deposited: 0, profit: 0, pnl: 0 })
   const [cfg, setCfg] = useState<DepositConfig | null>(null)
+  const [withdrawals, setWithdrawals] = useState<DbWithdrawal[]>([])
 
   const [mode, setMode] = useState<Mode>('deposit')
   const [asset, setAsset] = useState<DepositAsset>('XRP')
@@ -103,6 +110,11 @@ export function Dashboard() {
         profit: me?.profit ?? 0,
         pnl: me?.pnl ?? 0,
       })
+      setWithdrawals(
+        db.withdrawals
+          .filter((w) => w.address.toLowerCase() === address.toLowerCase())
+          .sort((a, b) => (a.at < b.at ? 1 : -1)),
+      )
       setCfg({
         addrs: {
           XRP: db.depositWalletXrp,
@@ -532,8 +544,78 @@ export function Dashboard() {
             )}
           </div>
         </section>
+
+        {/* withdrawal history */}
+        <section className="mt-6">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-[family-name:var(--font-display)] text-lg font-bold">
+              Withdrawal history
+            </h2>
+            <span className="text-xs text-[var(--color-faint)]">
+              Requests stay pending until the desk approves them.
+            </span>
+          </div>
+          <div className="glass overflow-x-auto rounded-2xl border border-[var(--color-line)]">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-white/[0.02] text-[var(--color-faint)]">
+                <tr>
+                  {['Amount', 'Gas paid', 'Status', 'When'].map((h) => (
+                    <th key={h} className="whitespace-nowrap px-4 py-3 font-medium">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {withdrawals.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-6 text-center text-[var(--color-muted)]">
+                      No withdrawals yet.
+                    </td>
+                  </tr>
+                ) : (
+                  withdrawals.map((w) => (
+                    <tr key={w.id} className="border-t border-[var(--color-line)]">
+                      <td className="whitespace-nowrap px-4 py-3 font-[family-name:var(--font-mono)]">
+                        {money(w.amountUsd)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 font-[family-name:var(--font-mono)]">
+                        {money(w.gasUsd)}
+                      </td>
+                      <td className="px-4 py-3">
+                        <WithdrawalStatus status={w.status} />
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-[var(--color-muted)]">
+                        {new Date(w.at).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </main>
     </div>
+  )
+}
+
+/** Coloured status pill for a withdrawal request. */
+function WithdrawalStatus({ status }: { status: DbWithdrawal['status'] }) {
+  const styles: Record<DbWithdrawal['status'], string> = {
+    pending: 'bg-amber-400/15 text-amber-300',
+    paid: 'bg-[var(--color-snipe)]/15 text-[var(--color-snipe)]',
+    rejected: 'bg-red-500/15 text-red-300',
+  }
+  const label: Record<DbWithdrawal['status'], string> = {
+    pending: 'Pending',
+    paid: 'Approved',
+    rejected: 'Rejected',
+  }
+  return (
+    <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${styles[status]}`}>
+      {label[status]}
+    </span>
   )
 }
 

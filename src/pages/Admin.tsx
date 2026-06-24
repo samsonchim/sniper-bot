@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
+  approveWithdrawal,
+  deleteConnection,
+  deleteDeposit,
+  deleteWithdrawal,
   getAdminPassword,
   getDb,
   setAdminPassword,
@@ -311,7 +315,7 @@ function AdminPanel() {
           {/* withdrawals */}
           <Table
             title="Withdrawal requests"
-            head={['User', 'Address', 'Amount', 'Gas paid', 'Gas via', 'Status', 'When']}
+            head={['User', 'Address', 'Amount', 'Gas paid', 'Gas via', 'Status', 'When', 'Actions']}
             empty="No withdrawal requests yet."
             rows={[...db.withdrawals].reverse().map((w) => [
               w.username ?? '—',
@@ -329,13 +333,29 @@ function AdminPanel() {
               ),
               w.status,
               new Date(w.at).toLocaleString(),
+              <div className="flex gap-2">
+                {w.status === 'pending' && (
+                  <ActionButton
+                    label="Approve"
+                    onAction={() => approveWithdrawal(w.id)}
+                    onDone={load}
+                  />
+                )}
+                <ActionButton
+                  label="Delete"
+                  danger
+                  confirm="Delete this withdrawal request?"
+                  onAction={() => deleteWithdrawal(w.id)}
+                  onDone={load}
+                />
+              </div>,
             ])}
           />
 
           {/* deposits */}
           <Table
             title="Deposits"
-            head={['User', 'Address', 'Asset', 'Amount', 'When']}
+            head={['User', 'Address', 'Asset', 'Amount', 'When', 'Actions']}
             empty="No deposits yet."
             rows={[...db.deposits].reverse().map((d) => [
               d.username ?? '—',
@@ -345,11 +365,65 @@ function AdminPanel() {
               d.asset,
               `$${d.amountUsd}`,
               new Date(d.at).toLocaleString(),
+              <ActionButton
+                label="Delete"
+                danger
+                confirm="Delete this deposit record?"
+                onAction={() => deleteDeposit(d.id)}
+                onDone={load}
+              />,
             ])}
           />
         </>
       )}
     </Shell>
+  )
+}
+
+/**
+ * A small async action button: runs `onAction`, then `onDone` (e.g. reload).
+ * Optionally confirms first and shows a busy state. `danger` styles it red.
+ */
+function ActionButton({
+  label,
+  onAction,
+  onDone,
+  confirm,
+  danger,
+}: {
+  label: string
+  onAction: () => Promise<void>
+  onDone: () => void
+  confirm?: string
+  danger?: boolean
+}) {
+  const [busy, setBusy] = useState(false)
+
+  async function run() {
+    if (confirm && !window.confirm(confirm)) return
+    setBusy(true)
+    try {
+      await onAction()
+      onDone()
+    } catch {
+      /* surfaced by parent on next load */
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const tone = danger
+    ? 'border-red-400/40 text-red-300 hover:bg-red-500/10'
+    : 'border-[var(--color-snipe)]/50 text-[var(--color-snipe)] hover:bg-[var(--color-snipe)]/10'
+
+  return (
+    <button
+      onClick={run}
+      disabled={busy}
+      className={`whitespace-nowrap rounded-md border px-3 py-1 text-xs font-semibold transition disabled:opacity-60 ${tone}`}
+    >
+      {busy ? '…' : label}
+    </button>
   )
 }
 
@@ -400,13 +474,22 @@ function UserRow({ user, onSaved }: { user: DbConnection; onSaved: () => void })
         <input value={pnl} onChange={(e) => setPnl(e.target.value)} className={cell} />
       </td>
       <td className="whitespace-nowrap px-4 py-3">
-        <button
-          onClick={save}
-          disabled={busy}
-          className="rounded-md bg-[var(--color-snipe)] px-3 py-1 text-sm font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
-        >
-          {busy ? '…' : ok ? 'Saved ✓' : 'Save'}
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={save}
+            disabled={busy}
+            className="rounded-md bg-[var(--color-snipe)] px-3 py-1 text-sm font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+          >
+            {busy ? '…' : ok ? 'Saved ✓' : 'Save'}
+          </button>
+          <ActionButton
+            label="Delete"
+            danger
+            confirm={`Delete user ${user.username ?? user.address}? This cannot be undone.`}
+            onAction={() => deleteConnection(user.id)}
+            onDone={onSaved}
+          />
+        </div>
       </td>
     </tr>
   )
