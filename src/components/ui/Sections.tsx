@@ -95,7 +95,7 @@ export function Sections({ onConnect }: { onConnect: () => void }) {
           <h1 className="text-fluid-hero mt-6 max-w-5xl font-[family-name:var(--font-display)] font-bold">
             Snipe first.
             <br />
-            <span className="bg-gradient-to-r from-[var(--color-snipe)] via-[var(--color-cyan)] to-[var(--color-violet)] bg-clip-text text-transparent">
+            <span className="text-[var(--color-snipe)]">
               Every block.
             </span>
           </h1>
@@ -209,7 +209,7 @@ export function Sections({ onConnect }: { onConnect: () => void }) {
           {STATS.map((s, i) => (
             <Reveal key={s.label} delay={i * 0.1}>
               <div className="flex h-full flex-col items-center justify-center gap-2 bg-[var(--color-ink)] px-4 py-12">
-                <span className="text-fluid-stat bg-gradient-to-b from-white to-[var(--color-snipe)] bg-clip-text font-[family-name:var(--font-display)] font-bold text-transparent">
+                <span className="text-fluid-stat font-[family-name:var(--font-display)] font-bold text-white">
                   {s.value}
                 </span>
                 <span className="text-sm uppercase tracking-wide text-[var(--color-muted)]">
