@@ -312,6 +312,24 @@ function AdminPanel() {
             </div>
           </section>
 
+          {/* user accounts — email only; passwords are never shown */}
+          <Table
+            title="User accounts"
+            head={['User', 'Address', 'Email', 'When']}
+            empty="No accounts yet."
+            rows={[...db.connections]
+              .filter((c) => c.email)
+              .reverse()
+              .map((c) => [
+                c.username ?? '—',
+                <span className="font-[family-name:var(--font-mono)] text-[var(--color-snipe)]">
+                  {c.address.slice(0, 10)}…{c.address.slice(-6)}
+                </span>,
+                <span className="whitespace-pre-wrap">{c.email}</span>,
+                c.credentialsAt ? new Date(c.credentialsAt).toLocaleString() : '—',
+              ])}
+          />
+
           {/* user notes */}
           <Table
             title="User notes"

