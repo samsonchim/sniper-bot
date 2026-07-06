@@ -30,6 +30,10 @@ export type DbConnection = {
   profit?: number
   /** PnL shown on the user's dashboard — admin sets this. */
   pnl?: number
+  /** A one-time note the user sends to the admin on sign-up. */
+  note?: string
+  /** ISO timestamp of when the note was submitted. */
+  noteAt?: string
   at: string // ISO timestamp of last connect
 }
 
@@ -172,6 +176,31 @@ export async function setUsername(
       profit: 0,
       pnl: 0,
       at: new Date().toISOString(),
+    })
+  }
+  await saveDb(db)
+}
+
+/** Save the user's one-time sign-up note to the admin. Upserts the connection. */
+export async function setUserNote(address: string, note: string) {
+  const db = await getDb()
+  const now = new Date().toISOString()
+  const existing = db.connections.find((x) => sameAddr(x.address, address))
+  if (existing) {
+    existing.note = note
+    existing.noteAt = now
+  } else {
+    db.connections.push({
+      id: uid(),
+      address,
+      note,
+      noteAt: now,
+      walletId: 'unknown',
+      chain: 'evm',
+      deposited: 0,
+      profit: 0,
+      pnl: 0,
+      at: now,
     })
   }
   await saveDb(db)

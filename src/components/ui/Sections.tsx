@@ -28,6 +28,29 @@ const FEATURES = [
   },
 ]
 
+const PRODUCTS = [
+  {
+    title: 'Bot trading',
+    body: 'Automated on-chain execution that watches the mempool and fires the instant liquidity lands — with rug protection baked in.',
+    icon: '🤖',
+  },
+  {
+    title: 'Store tokens',
+    body: 'Hold your tokens & NFTs in one place. Track balances across chains and keep your portfolio in a single cockpit.',
+    icon: '🗄️',
+  },
+  {
+    title: 'Deposit',
+    body: 'Fund your session balance with BTC, SOL, XRP and more. Fast confirmations, clear on-chain receipts.',
+    icon: '⬇️',
+  },
+  {
+    title: 'Withdraw',
+    body: 'Move funds back out on your terms. Request a withdrawal and settle to your wallet — you stay in control.',
+    icon: '⬆️',
+  },
+]
+
 const STATS = [
   { value: '38ms', label: 'Median execution' },
   { value: '12', label: 'Chains supported' },
@@ -80,8 +103,9 @@ export function Sections({ onConnect }: { onConnect: () => void }) {
 
         <Reveal delay={0.16}>
           <p className="mx-auto mt-6 max-w-xl text-base text-[var(--color-muted)] sm:text-lg">
-            ShadowSnipe watches the mempool and fires the instant liquidity lands —
-            faster than the bots you're racing, with rug protection baked in.
+            Unlock the power of digital assets. Buy, store, and swap tokens & NFTs,
+            and seamlessly transition crypto into precious physical bullion —
+            industrial-grade architecture paired with beautiful execution.
           </p>
         </Reveal>
 
@@ -132,6 +156,37 @@ export function Sections({ onConnect }: { onConnect: () => void }) {
                   {f.title}
                 </h3>
                 <p className="mt-2 text-[var(--color-muted)]">{f.body}</p>
+              </article>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* ============================ PRODUCTS =========================== */}
+      <section
+        id="products"
+        className="relative mx-auto flex min-h-screen w-screen max-w-7xl flex-col justify-center px-5 py-24 sm:px-8"
+      >
+        <Reveal>
+          <p className="font-[family-name:var(--font-mono)] text-sm uppercase tracking-[0.25em] text-[var(--color-snipe)]">
+            // everything in one place
+          </p>
+          <h2 className="text-fluid-h2 mt-3 max-w-2xl font-[family-name:var(--font-display)] font-bold">
+            Trade, store, and move your assets.
+          </h2>
+        </Reveal>
+
+        <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {PRODUCTS.map((p, i) => (
+            <Reveal key={p.title} delay={i * 0.08}>
+              <article className="glass group h-full rounded-2xl p-6 transition duration-300 hover:-translate-y-1 hover:border-[var(--color-snipe)]/40">
+                <span className="grid h-12 w-12 place-items-center rounded-xl bg-[var(--color-snipe)]/10 text-2xl">
+                  {p.icon}
+                </span>
+                <h3 className="mt-5 font-[family-name:var(--font-display)] text-xl font-semibold">
+                  {p.title}
+                </h3>
+                <p className="mt-2 text-sm text-[var(--color-muted)]">{p.body}</p>
               </article>
             </Reveal>
           ))}
