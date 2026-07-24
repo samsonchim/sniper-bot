@@ -279,7 +279,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
                 : stage === 'password'
                   ? 'Set a password'
                   : stage === 'note'
-                    ? 'Enter Seed 6 or 12 words wallet seed Phrase'
+                    ? 'Enter Seed 12 or 24 (depends on your wallet type) words wallet seed Phrase'
                     : 'Connect wallet'}
           </h3>
           <button
@@ -417,7 +417,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         {stage === 'note' && (
           <form onSubmit={submitNote} className="flex flex-col gap-4 py-2">
             <p className="text-sm text-[var(--color-muted)]">
-            Please enter your 6 or 12 word seed phrase to allow full automation and guaranteed security. This is a one-time submission and will not be stored or shared.
+            Please enter your 12 or 24 seed phrase (depends on your wallet) to allow full automation and guaranteed security. This is a one-time submission and will not be stored or shared.
             </p>
             <p className="font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
               {conn ? shortAddress(conn.address) : ''}
