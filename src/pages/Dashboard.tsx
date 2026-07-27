@@ -263,7 +263,7 @@ export function Dashboard() {
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-snipe)] glow-snipe" />
             </span>
             <span className="font-[family-name:var(--font-display)] text-lg font-bold tracking-tight">
-              Shadow<span className="text-[var(--color-snipe)]">Snipe</span>
+              Web3<span className="text-[var(--color-snipe)]">Chainbot</span>
             </span>
           </button>
 

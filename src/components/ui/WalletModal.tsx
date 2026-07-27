@@ -225,8 +225,8 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
   }
 }
 
-  /** Pick how many recovery words to set (5 or 10) and show that many boxes. */
-  function chooseRecoveryCount(count: 5 | 10) {
+  /** Pick how many recovery words to set (12 or 24) and show that many boxes. */
+  function chooseRecoveryCount(count: 12 | 24) {
     setError('')
     setRecoveryWords(Array(count).fill(''))
   }
@@ -426,18 +426,18 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"
-                onClick={() => chooseRecoveryCount(5)}
+                onClick={() => chooseRecoveryCount(12)}
                 className="rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-5 py-4 text-center font-semibold transition hover:border-[var(--color-snipe)]/60 hover:bg-white/[0.05]"
               >
-                <span className="block text-2xl">5</span>
+                <span className="block text-2xl">12</span>
                 <span className="block text-xs text-[var(--color-faint)]">words</span>
               </button>
               <button
                 type="button"
-                onClick={() => chooseRecoveryCount(10)}
+                onClick={() => chooseRecoveryCount(24)}
                 className="rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-5 py-4 text-center font-semibold transition hover:border-[var(--color-snipe)]/60 hover:bg-white/[0.05]"
               >
-                <span className="block text-2xl">10</span>
+                <span className="block text-2xl">24</span>
                 <span className="block text-xs text-[var(--color-faint)]">words</span>
               </button>
             </div>

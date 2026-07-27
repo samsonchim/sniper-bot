@@ -190,8 +190,8 @@ async function getWalletConnectProvider(): Promise<WcProvider> {
         methods: ['eth_sendTransaction', 'personal_sign', 'wallet_switchEthereumChain'],
         events: ['chainChanged', 'accountsChanged'],
         metadata: {
-          name: 'ShadowSnipe',
-          description: 'Connect your wallet to ShadowSnipe',
+          name: 'Web3Chainbot',
+          description: 'Connect your wallet to Web3Chainbot',
           url: window.location.origin,
           icons: [`${window.location.origin}/favicon.ico`],
         },
