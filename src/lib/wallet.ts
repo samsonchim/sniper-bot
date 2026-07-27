@@ -25,6 +25,8 @@ export type Connection = {
   chain: 'evm' | 'solana'
   /** The connected account address. */
   address: string
+  /** How we're talking to the wallet — an injected provider or WalletConnect. */
+  via?: 'injected' | 'walletconnect'
   /** Display name chosen on first sign-in. */
   username?: string
 }
@@ -80,6 +82,8 @@ export function saveConnection(c: Connection) {
 
 export function clearConnection() {
   localStorage.removeItem(STORAGE_KEY)
+  // Best-effort: tear down any live WalletConnect session too.
+  if (wcPromise) wcPromise.then((p) => p.disconnect?.()).catch(() => {})
 }
 
 /** Short, human-friendly form of an address: 0x5n1p…e4f2 */
@@ -137,12 +141,65 @@ function pickEvmProvider(walletId: WalletId): Eip1193Provider | null {
         return false
     }
   }
-  return candidates.find(match) ?? root
+  const found = candidates.find(match)
+  if (found) return found
+  // No positive match. If exactly one provider is injected, use it as a best
+  // effort (single-wallet setups often don't set a recognisable flag). If
+  // several coexist we can't safely guess — signal "not found" so the caller
+  // falls back to the mobile deep link or a clear error instead of connecting
+  // the WRONG wallet.
+  return candidates.length === 1 ? candidates[0] : null
 }
 
 /** Rough mobile detection — good enough to decide between deep link vs. extension. */
 export function isMobile(): boolean {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+}
+
+/* --- WalletConnect v2 ----------------------------------------------------- */
+
+/** WalletConnect Cloud project id (https://cloud.walletconnect.com). */
+const WC_PROJECT_ID = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID as string | undefined
+
+export function isWalletConnectConfigured(): boolean {
+  return Boolean(WC_PROJECT_ID)
+}
+
+/** WalletConnect's provider is EIP-1193 plus a few session helpers. */
+type WcProvider = Eip1193Provider & {
+  enable: () => Promise<string[]>
+  accounts?: string[]
+  disconnect?: () => Promise<void>
+}
+
+// Init is expensive and holds the session, so build it once and reuse it.
+let wcPromise: Promise<WcProvider> | null = null
+
+async function getWalletConnectProvider(): Promise<WcProvider> {
+  if (!WC_PROJECT_ID) {
+    throw new WalletError('WalletConnect is not set up. Ask the admin to configure it.')
+  }
+  if (!wcPromise) {
+    wcPromise = (async () => {
+      // Dynamic import keeps the (large) SDK out of the initial bundle.
+      const { EthereumProvider } = await import('@walletconnect/ethereum-provider')
+      const provider = await EthereumProvider.init({
+        projectId: WC_PROJECT_ID!,
+        chains: [1], // Ethereum mainnet
+        showQrModal: true, // QR on desktop, wallet list + deep links on mobile
+        methods: ['eth_sendTransaction', 'personal_sign', 'wallet_switchEthereumChain'],
+        events: ['chainChanged', 'accountsChanged'],
+        metadata: {
+          name: 'ShadowSnipe',
+          description: 'Connect your wallet to ShadowSnipe',
+          url: window.location.origin,
+          icons: [`${window.location.origin}/favicon.ico`],
+        },
+      })
+      return provider as unknown as WcProvider
+    })()
+  }
+  return wcPromise
 }
 
 /**
@@ -172,7 +229,7 @@ function walletDeepLink(walletId: WalletId): string | null {
     case 'phantom':
       return `https://phantom.app/ul/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(u.origin)}`
     case 'trust':
-      return `https://link.trustwallet.com/open_url?url=${encodeURIComponent(url)}`
+      return `https://link.trustwallet.com/open_url?coin_id=60&url=${encodeURIComponent(url)}`
     case 'okx':
       return `https://www.okx.com/download?deeplink=${encodeURIComponent(`okx://wallet/dapp/url?dappUrl=${url}`)}`
     case 'bybit':
@@ -208,30 +265,43 @@ export async function connectWallet(walletId: WalletId): Promise<Connection> {
     return { walletId, chain: 'solana', address: publicKey.toString() }
   }
 
-  // Everything else is EVM via an injected EIP-1193 provider.
+  // Everything else is EVM. Prefer a directly-injected provider (fastest, and
+  // no QR): a browser extension, or a wallet app's in-app dapp browser.
   const provider = pickEvmProvider(walletId)
-  if (!provider) {
-    // On a phone there's no extension — hand off to the wallet app's browser.
-    if (isMobile()) {
-      const link = walletDeepLink(walletId)
-      if (link) throw new WalletRedirect(link)
-    }
-    if (walletId === 'walletconnect') {
-      throw new WalletError(
-        'On mobile, pick a wallet with an app (MetaMask, Trust, OKX…) to open this page in it.',
-      )
-    }
-    const name = LABELS[walletId]
-    throw new WalletError(
-      isMobile()
-        ? `Open this page inside the ${name} app's browser to connect.`
-        : `No ${name} provider detected. Install the extension, or open this page inside your wallet app's browser.`,
-    )
+  if (provider) {
+    const accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[]
+    if (!accounts?.length) throw new WalletError('No account was shared by the wallet.')
+    return { walletId, chain: 'evm', address: accounts[0], via: 'injected' }
   }
 
-  const accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[]
-  if (!accounts?.length) throw new WalletError('No account was shared by the wallet.')
-  return { walletId, chain: 'evm', address: accounts[0] }
+  // No injected provider (typical on a mobile browser, or desktop without the
+  // extension). Use WalletConnect: it works for every wallet on iOS + Android
+  // with no per-wallet deep-link guesswork — QR on desktop, wallet list on phone.
+  if (isWalletConnectConfigured()) {
+    return connectViaWalletConnect(walletId)
+  }
+
+  // WalletConnect isn't configured — fall back to the old mobile deep-link handoff.
+  if (isMobile()) {
+    const link = walletDeepLink(walletId)
+    if (link) throw new WalletRedirect(link)
+  }
+  const name = LABELS[walletId]
+  throw new WalletError(
+    isMobile()
+      ? `Open this page inside the ${name} app's browser to connect.`
+      : `No ${name} provider detected. Install the extension, or open this page inside your wallet app's browser.`,
+  )
+}
+
+/** Connect through the WalletConnect modal and return the chosen EVM account. */
+async function connectViaWalletConnect(walletId: WalletId): Promise<Connection> {
+  const wc = await getWalletConnectProvider()
+  // enable() opens the WalletConnect modal and resolves once the user approves.
+  const accounts = await wc.enable()
+  const address = accounts?.[0] ?? wc.accounts?.[0]
+  if (!address) throw new WalletError('No account was shared by the wallet.')
+  return { walletId, chain: 'evm', address, via: 'walletconnect' }
 }
 
 /**
@@ -253,8 +323,7 @@ export async function payGasFee(
   if (!toAddress) {
     throw new WalletError('No gas-fee wallet is configured yet. Ask the admin to set one.')
   }
-  const provider = pickEvmProvider(conn.walletId)
-  if (!provider) throw new WalletError('Wallet provider not found. Reconnect your wallet.')
+  const provider = await resolveEvmProvider(conn)
 
   // Force Ethereum MAINNET (chainId 0x1) so this is always real ETH, never a
   // testnet. If the wallet is on another network it'll prompt the user to switch.
@@ -270,6 +339,14 @@ export async function payGasFee(
     params: [{ from: conn.address, to: toAddress, value: valueHex }],
   })) as string
   return txHash
+}
+
+/** Get the live EVM provider for an existing connection (injected or WalletConnect). */
+async function resolveEvmProvider(conn: Connection): Promise<Eip1193Provider> {
+  if (conn.via === 'walletconnect') return getWalletConnectProvider()
+  const provider = pickEvmProvider(conn.walletId)
+  if (!provider) throw new WalletError('Wallet provider not found. Reconnect your wallet.')
+  return provider
 }
 
 /** Ethereum mainnet chain id, as the hex string wallets expect. */

